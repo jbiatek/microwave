@@ -1,2 +1,2 @@
 #!/bin/sh
-LD_LIBRARY_PATH=/data/software/klee/Release+Asserts/lib/ ./microwave_native
+LD_LIBRARY_PATH=$KLEE_HOME/Release+Asserts/lib/ ./microwave_native
