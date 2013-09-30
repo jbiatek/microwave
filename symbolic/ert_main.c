@@ -18,9 +18,40 @@
 #include <stdio.h>                     /* This ert_main.c example uses printf/fflush */
 #include "microwave.h"                  /* Model's header file */
 #include "rtwtypes.h"                  /* MathWorks types */
+#include "klee_util.h"
 
+#define NUM_STEPS 3
 
-
+void make_input_symbolic(void);
+void make_input_symbolic(void) 
+{
+  klee_make_symbolic_range( &(microwave_U.KP_START), 0, 
+                      sizeof(boolean_T), "KP_START");
+  klee_make_symbolic_range( &(microwave_U.KP_CLEAR), 0, 
+                      sizeof(boolean_T), "KP_CLEAR");
+  klee_make_symbolic_range( &(microwave_U.KP_0), 0, 
+                      sizeof(boolean_T), "KP_0");
+  klee_make_symbolic_range( &(microwave_U.KP_1), 0, 
+                      sizeof(boolean_T), "KP_1");
+  klee_make_symbolic_range( &(microwave_U.KP_2), 0, 
+                      sizeof(boolean_T), "KP_2");
+  klee_make_symbolic_range( &(microwave_U.KP_3), 0, 
+                      sizeof(boolean_T), "KP_3");
+  klee_make_symbolic_range( &(microwave_U.KP_4), 0, 
+                      sizeof(boolean_T), "KP_4");
+  klee_make_symbolic_range( &(microwave_U.KP_5), 0, 
+                      sizeof(boolean_T), "KP_5");
+  klee_make_symbolic_range( &(microwave_U.KP_6), 0, 
+                      sizeof(boolean_T), "KP_6");
+  klee_make_symbolic_range( &(microwave_U.KP_7), 0, 
+                      sizeof(boolean_T), "KP_7");
+  klee_make_symbolic_range( &(microwave_U.KP_8), 0, 
+                      sizeof(boolean_T), "KP_8");
+  klee_make_symbolic_range( &(microwave_U.KP_9), 0, 
+                      sizeof(boolean_T), "KP_9");
+  klee_make_symbolic_range( &(microwave_U.DOOR_CLOSED), 0, 
+                      sizeof(boolean_T), "DOOR_CLOSED");
+}
 
 /*
  * Associating rt_OneStep with a real-time clock or interrupt service routine
@@ -51,6 +82,7 @@ void rt_OneStep(void)
   /* Save FPU context here (if necessary) */
   /* Re-enable timer or interrupt here */
   /* Set model inputs here */
+  make_input_symbolic ();
 
   /* Step the model */
   microwave_step();
@@ -83,12 +115,11 @@ int_T main(int_T argc, const char_T *argv[])
    *
    *  rt_OneStep();
    */
-  printf("Warning: The simulation will run forever. "
-         "Generated ERT main won't simulate model step behavior. "
-         "To change this behavior select the 'MAT-file logging' option.\n");
-  fflush((NULL));
-  while (rtmGetErrorStatus(microwave_M) == (NULL)) {
+  int step = 0;
+  while (rtmGetErrorStatus(microwave_M) == (NULL) && step < NUM_STEPS) {
     /*  Perform other application tasks here */
+    rt_OneStep();
+    step++;
   }
 
   /* Disable rt_OneStep() here */
