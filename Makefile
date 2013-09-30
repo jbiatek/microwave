@@ -18,12 +18,12 @@ LLVM_CFLAGS = -emit-llvm
 
 # define any directories containing header files other than /usr/include
 #
-INCLUDES = -I/data/software/klee/include/klee/ -I/home/jbiatek/microwave_code/microwave/microwave_grt_rtw/ -I/home/jbiatek/microwave_code/R2013a/extern/include/ -I/home/jbiatek/microwave_code/R2013a/rtw/c/src/ext_mode/common/ -I/home/jbiatek/microwave_code/R2013a/rtw/c/src/ -I/home/jbiatek/microwave_code/R2013a/simulink/include/
+INCLUDES = -I$(KLEE_HOME)/include/klee/ -Imicrowave/microwave_grt_rtw/ -IR2013a/extern/include/ -IR2013a/rtw/c/src/ext_mode/common/ -IR2013a/rtw/c/src/ -IR2013a/simulink/include/
 
 # define library paths in addition to /usr/lib
 #   if I wanted to include libraries not in /usr/lib I'd specify
 #   their path using -Lpath, something like:
-LFLAGS = -lm -L/data/software/klee/Release+Asserts/lib/ 
+LFLAGS = -lm -L$(KLEE_HOME)/Release+Asserts/lib/ 
 
 # define any libraries to link into executable:
 #   if I want to link in libraries (libx.so or libx.a) I use the -llibname 
