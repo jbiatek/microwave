@@ -22,35 +22,41 @@
 
 #define NUM_STEPS 3
 
+int step_num;
+ExtU_microwave_T inputs[NUM_STEPS];
+
 void make_input_symbolic(void);
 void make_input_symbolic(void) 
 {
-  klee_make_symbolic_range( &(microwave_U.KP_START), 0, 
-                      sizeof(boolean_T), "KP_START");
-  klee_make_symbolic_range( &(microwave_U.KP_CLEAR), 0, 
-                      sizeof(boolean_T), "KP_CLEAR");
-  klee_make_symbolic_range( &(microwave_U.KP_0), 0, 
-                      sizeof(boolean_T), "KP_0");
-  klee_make_symbolic_range( &(microwave_U.KP_1), 0, 
-                      sizeof(boolean_T), "KP_1");
-  klee_make_symbolic_range( &(microwave_U.KP_2), 0, 
-                      sizeof(boolean_T), "KP_2");
-  klee_make_symbolic_range( &(microwave_U.KP_3), 0, 
-                      sizeof(boolean_T), "KP_3");
-  klee_make_symbolic_range( &(microwave_U.KP_4), 0, 
-                      sizeof(boolean_T), "KP_4");
-  klee_make_symbolic_range( &(microwave_U.KP_5), 0, 
-                      sizeof(boolean_T), "KP_5");
-  klee_make_symbolic_range( &(microwave_U.KP_6), 0, 
-                      sizeof(boolean_T), "KP_6");
-  klee_make_symbolic_range( &(microwave_U.KP_7), 0, 
-                      sizeof(boolean_T), "KP_7");
-  klee_make_symbolic_range( &(microwave_U.KP_8), 0, 
-                      sizeof(boolean_T), "KP_8");
-  klee_make_symbolic_range( &(microwave_U.KP_9), 0, 
-                      sizeof(boolean_T), "KP_9");
-  klee_make_symbolic_range( &(microwave_U.DOOR_CLOSED), 0, 
-                      sizeof(boolean_T), "DOOR_CLOSED");
+  int i = 0;
+  for (i = 0; i < NUM_STEPS; i++) {
+    klee_make_symbolic_range( &(inputs[i].KP_START), 0, 
+                        sizeof(boolean_T), "KP_START");
+    klee_make_symbolic_range( &(inputs[i].KP_CLEAR), 0, 
+                        sizeof(boolean_T), "KP_CLEAR");
+    klee_make_symbolic_range( &(inputs[i].KP_0), 0, 
+                        sizeof(boolean_T), "KP_0");
+    klee_make_symbolic_range( &(inputs[i].KP_1), 0, 
+                        sizeof(boolean_T), "KP_1");
+    klee_make_symbolic_range( &(inputs[i].KP_2), 0, 
+                        sizeof(boolean_T), "KP_2");
+    klee_make_symbolic_range( &(inputs[i].KP_3), 0, 
+                        sizeof(boolean_T), "KP_3");
+    klee_make_symbolic_range( &(inputs[i].KP_4), 0, 
+                        sizeof(boolean_T), "KP_4");
+    klee_make_symbolic_range( &(inputs[i].KP_5), 0, 
+                        sizeof(boolean_T), "KP_5");
+    klee_make_symbolic_range( &(inputs[i].KP_6), 0, 
+                        sizeof(boolean_T), "KP_6");
+    klee_make_symbolic_range( &(inputs[i].KP_7), 0, 
+                        sizeof(boolean_T), "KP_7");
+    klee_make_symbolic_range( &(inputs[i].KP_8), 0, 
+                        sizeof(boolean_T), "KP_8");
+    klee_make_symbolic_range( &(inputs[i].KP_9), 0, 
+                        sizeof(boolean_T), "KP_9");
+    klee_make_symbolic_range( &(inputs[i].DOOR_CLOSED), 0, 
+                        sizeof(boolean_T), "DOOR_CLOSED");
+  }
 }
 
 /*
@@ -82,7 +88,7 @@ void rt_OneStep(void)
   /* Save FPU context here (if necessary) */
   /* Re-enable timer or interrupt here */
   /* Set model inputs here */
-  make_input_symbolic ();
+  microwave_U = inputs[step_num];
 
   /* Step the model */
   microwave_step();
@@ -109,17 +115,20 @@ int_T main(int_T argc, const char_T *argv[])
   /* Initialize model */
   microwave_initialize(); // used to have an argument: 1.
 
+  /* Create symbolic inputs beforehand */
+  make_input_symbolic();
+
   /* Attach rt_OneStep to a timer or interrupt service routine with
    * period 1.0 seconds (the model's base sample time) here.  The
    * call syntax for rt_OneStep is
    *
    *  rt_OneStep();
    */
-  int step = 0;
-  while (rtmGetErrorStatus(microwave_M) == (NULL) && step < NUM_STEPS) {
+  step_num = 0;
+  while (rtmGetErrorStatus(microwave_M) == (NULL) && step_num < NUM_STEPS) {
     /*  Perform other application tasks here */
     rt_OneStep();
-    step++;
+    step_num++;
   }
 
   /* Disable rt_OneStep() here */
