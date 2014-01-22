@@ -16,6 +16,8 @@ LLVM_LD_FLAGS = -link-as-library
 CFLAGS = -Wall -g
 LLVM_CFLAGS = -emit-llvm 
 
+KLEE_HOME = /data/software/klee
+
 # define any directories containing header files other than /usr/include
 #
 INCLUDES = -I$(KLEE_HOME)/include/klee/ -Imicrowave/microwave_grt_rtw/ -IR2013a/extern/include/ -IR2013a/rtw/c/src/ext_mode/common/ -IR2013a/rtw/c/src/ -IR2013a/simulink/include/
