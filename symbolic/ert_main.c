@@ -57,6 +57,8 @@ void make_input_symbolic(void)
     klee_make_symbolic_range( &(inputs[i].DOOR_CLOSED), 0, 
                         sizeof(boolean_T), "DOOR_CLOSED");
   }
+
+  //klee_make_symbolic_range( &(inputs), 0, sizeof(inputs), "everything");
 }
 
 /*
