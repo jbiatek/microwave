@@ -17,7 +17,7 @@ LLVM_LD_FLAGS = -link-as-library
 CFLAGS = -Wall -g -fprofile-arcs -ftest-coverage
 LLVM_CFLAGS = -emit-llvm 
 
-KLEE_HOME = /data/software/klee
+# KLEE_HOME = /data/software/klee
 
 # define any directories containing header files other than /usr/include
 #
