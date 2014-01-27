@@ -7,7 +7,7 @@ The code for the microwave model. Set $KLEE_HOME to the root of the Klee directo
 GCov
 ====
 
-The native binary will write out the standard GCov files, which are by default stored next to the .c and .o files. Just run it with $KTEST_FILE pointing to the file you'd like to replay. Coverage can be collected over multiple runs. The `native_run_all.sh` script will run all ktest files passed to it so you can do it all in one shot. 
+The native binary will write out the standard GCov files, which are by default stored next to the .c and .o files. Just run it with `$KTEST_FILE` pointing to the file you'd like to replay. Coverage can be collected over multiple runs. The `native_run_all.sh` script will run all ktest files passed to it so you can do it all in one shot. 
 
 For some reason, gcov doesn't handle relative paths well, so you have to tell it where to find the .gcda (coverage data) file is for the .c file you're interested in by using the -o option. So something like this:
 
@@ -18,11 +18,11 @@ If that seems like a big pain, it is. There's also `gcovr`, which will work recu
 The Makefile can reset the counters for you by deleting all .gcda files, just call `make clean_gcov`. The whole process might look something like this:
 
     make
-    ./native_run_all klee-last/*.ktest
+    ./native_run_all.sh klee-last/*.ktest
     gcovr -k
     mv *.gcov klee_gcov_output
     make clean_gcov
-    ./native_run_all reactis/*.ktest
+    ./native_run_all.sh reactis/*.ktest
     gcovr -k
     mv *.gcov reactis_gcov_output
 
