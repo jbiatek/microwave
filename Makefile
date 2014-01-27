@@ -6,14 +6,15 @@
 #
 
 # define the C compiler to use
-CC = llvm-gcc
+CC = gcc
+LLVM_CC = llvm-gcc
 
 # define the linker for the llvm step, since apparently gcc hates bitcode
 LLVM_LD = llvm-ld
 LLVM_LD_FLAGS = -link-as-library
 
 # define any compile-time flags
-CFLAGS = -Wall -g
+CFLAGS = -Wall -g -fprofile-arcs -ftest-coverage
 LLVM_CFLAGS = -emit-llvm 
 
 KLEE_HOME = /data/software/klee
@@ -76,12 +77,14 @@ $(MAIN)_llvm: $(LLVM_OBJS)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $<  -o $@
 
 .c.bc:
-	$(CC) $(CFLAGS) $(INCLUDES) $(LLVM_CFLAGS) -c $<  -o $@
+	$(LLVM_CC) $(CFLAGS) $(INCLUDES) $(LLVM_CFLAGS) -c $<  -o $@
 
 clean:
 	$(RM) *.o *~ $(MAIN)_native $(MAIN)_llvm
 	find . -name \*.o -type f -delete
 	find . -name \*.bc -type f -delete
+	find . -name \*.gcno -type f -delete
+	find . -name \*.gcda -type f -delete
 
 depend: $(SRCS)
 	makedepend $(INCLUDES) $^
