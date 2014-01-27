@@ -56,7 +56,7 @@ MAIN = microwave
 # deleting dependencies appended to the file from 'make depend'
 #
 
-.PHONY: depend clean
+.PHONY: depend clean clean_gcov
 .SUFFIXES: .bc
 
 
@@ -79,12 +79,15 @@ $(MAIN)_llvm: $(LLVM_OBJS)
 .c.bc:
 	$(LLVM_CC) $(CFLAGS) $(INCLUDES) $(LLVM_CFLAGS) -c $<  -o $@
 
-clean:
+clean_gcov:
+	find . -name \*.gcda -type f -delete
+
+clean: clean_gcov
 	$(RM) *.o *~ $(MAIN)_native $(MAIN)_llvm
 	find . -name \*.o -type f -delete
 	find . -name \*.bc -type f -delete
 	find . -name \*.gcno -type f -delete
-	find . -name \*.gcda -type f -delete
+
 
 depend: $(SRCS)
 	makedepend $(INCLUDES) $^
