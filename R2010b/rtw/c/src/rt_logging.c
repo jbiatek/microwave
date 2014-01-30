@@ -1,6 +1,6 @@
-/* 
+/* $Revision: 1.1.6.16 $
  *
- * Copyright 1994-2012 The MathWorks, Inc.
+ * Copyright 1994-2009 The MathWorks, Inc.
  *
  * File: rt_logging.c
  *
@@ -16,26 +16,146 @@
  *         [u]int16_T    to be int32_T (logged as Matlab [u]int32)
  *         real_T        to be real32_T (logged as Matlab single)
  *
+ *
  */
+
+
+#define PUBLIC
+#define BEGIN_PUBLIC
+#define END_PUBLIC
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 
-
-#if !defined(MAT_FILE) || (defined(MAT_FILE) && MAT_FILE == 1)
-
+BEGIN_PUBLIC
 #include <stddef.h>                     /* size_t */
 #include "rtwtypes.h"
 #include "rt_mxclassid.h"
 #include "rtw_matlogging.h"
-#include "rt_logging.h"
+
 
 #ifndef TMW_NAME_LENGTH_MAX
 #define TMW_NAME_LENGTH_MAX 64
 #endif
 #define mxMAXNAM  TMW_NAME_LENGTH_MAX	/* maximum name length */
+
+/*=========*
+ * Defines *
+ *=========*/
+
+/*
+ * Logging related functions and data structures
+ */
+typedef double MatReal;                /* "real" data type used in model.mat  */
+typedef struct LogVar_Tag LogVar;
+typedef struct StructLogVar_Tag StructLogVar;
+
+typedef struct MatrixData_Tag {
+  char_T         name[mxMAXNAM];     /* Name of the variable                  */
+  int_T          nRows;              /* number of rows                        */
+  int_T          nCols;              /* number of columns                     */
+  int_T          nDims;              /* number of dimensions                  */
+  int_T          _dims[2];           /* most cases, dimensions are 2          */
+  int_T          *dims;              /* dimensions of the log variable we 
+                                        write to at each simulation time step.
+                                        E.g: (1) Non-frame data - 
+                                                 Signal dimension = [2 X 3]
+                                                 numDims = 2
+                                                 dims[0] = 2, dims[1] = 3
+                                             (2) Frame data - 
+                                                 Signal dimension = [2 X 3]
+                                                 numDims = 1
+                                                 dims[0] = 3                  */
+  void           *re;                /* pointer to real part of the data      */
+  void           *im;                /* pointer to imaginary part, if complex */
+  DTypeId        dTypeID;            /* data type id                          */
+  size_t         elSize;             /* element size in bytes                 */
+
+  RTWLogDataTypeConvert dataTypeConvertInfo;
+
+  mxClassID      mxID;               /* mxId corresponding to this dTypeID    */
+  uint32_T       logical;            /* is this a logical array ?             */
+  uint32_T       complex;            /* is this a complex matrix?             */
+  uint32_T       frameData;          /* is this data frame based?             */
+  uint32_T       frameSize;          /* is this data frame based?             */
+} MatrixData;
+
+typedef struct ValDimsData_Tag {
+  char_T         name[mxMAXNAM];     /* Name of the variable                  */
+  int_T          nRows;              /* number of rows                        */
+  int_T          nCols;              /* number of columns                     */
+  int_T          **currSigDims;      /* dimensions of current output          */
+  real_T         *dimsData;          /* pointer to the value of dimension     */
+} ValDimsData;
+
+struct LogVar_Tag {
+    MatrixData  data;                 /* Container for name, data etc.,       */
+    ValDimsData *valDims;             /* field of valueDimensions
+                                       1. If all logging signals are fixed-size,
+                                          then we set this field to NULL;
+                                       2. If any logging signal is variable-size,
+                                          then this field will be needed:
+                                         1) For fixed-size signal, this field is
+                                            an empty matrix;
+                                         2) Otherwise, it contains the dimension
+                                            information of the logging signal.
+                                      */
+    int_T      rowIdx;                /* current row index                    */
+    int_T      wrapped;               /* number of times the circular buffer
+                                       * has wrapped around                   */
+    int_T     nDataPoints;            /* total number of data points logged   */
+    int_T     usingDefaultBufSize;    /* used to print a message at end       */
+    int_T     okayToRealloc;          /* reallocate during sim?               */
+    int_T     decimation;             /* decimation factor                    */
+    int_T     numHits;                /* decimation hit count                 */
+
+    int_T     *coords;
+    int_T     *strides;
+    int_T     *currStrides;           /* coords, strides and currStrides will be
+                                         needed when logging variable-size 
+                                         signal to calculate whether the 
+                                         currently logging value is in the range.
+                                         If the current signal is fixed-size,
+                                         these pointers will be set to NULLs;
+                                         otherwise, we allocate memory for them.
+                                         (the size will be nDims in this case)
+                                      */
+
+    LogVar    *next;
+};
+
+typedef struct SignalsStruct_Tag {
+    int_T        numActiveFields;   /* number of active fields                */
+    const char_T *fieldNames;
+    int_T        numSignals;
+    LogVar       *values;
+    MatrixData   *dimensions;
+    MatrixData   *labels;
+    MatrixData   *plotStyles;
+    MatrixData   *titles;
+    MatrixData   *blockNames;
+    MatrixData   *stateNames;
+    MatrixData   *crossMdlRef;
+
+    boolean_T    logValueDimensions; /* If there's any variable-size signal 
+                                         we also should log 'valueDimensions' field
+                                      */
+    boolean_T    *isVarDims; /* is this signal a variable-size signal? */
+} SignalsStruct;
+
+struct StructLogVar_Tag {
+    char_T        name[mxMAXNAM];   /* Name of the ML Struct variable         */
+    int_T         numActiveFields;  /* number of active fields                */
+    boolean_T     logTime;
+    void          *time;
+    SignalsStruct signals;
+    MatrixData    *blockName;
+
+    StructLogVar  *next;
+};
+
 #define matUNKNOWN                  0
 #define	matINT8                     1
 #define	matUINT8                    2
@@ -49,6 +169,29 @@
 #define matUINT64                  13
 #define	matMATRIX                  14
 
+/* status of logging "valueDimensions" field */
+/* 
+  NO_LOGVALDIMS: 
+                 No need to log valueDimensions: 
+                 All signals are fixed-sized.
+
+  LOGVALDIMS_EMPTYMX: 
+                 Signals with mixed dimension modes,
+                 and the signal logged currently
+                 is fixed-sized. So set valueDimensions
+                 field to an empty matrix.
+
+  LOGVALDIMS_VARDIMS:
+                 Signal logged currently is variable-sized.
+*/
+typedef enum {
+    NO_LOGVALDIMS,      
+    LOGVALDIMS_EMPTYMX,
+    LOGVALDIMS_VARDIMS
+} LogValDimsStat;
+
+END_PUBLIC
+
 #define matLOGICAL_BIT          0x200
 #define matCOMPLEX_BIT          0x800
 
@@ -60,21 +203,21 @@
 #define matTAG_SIZE            (sizeof(int32_T) << 1)
 
 #ifndef DEFAULT_BUFFER_SIZE
-#define DEFAULT_BUFFER_SIZE      1024  /* used if maxRows=0 and Tfinal=0.0    */
+#define DEFAULT_BUFFER_SIZE      1024     /* used if maxRows=0 and Tfinal=0.0 */
 #endif
 
 #define FREE(m) if (m != NULL) free(m)
 
-/*==========*
- * typedefs *
- *==========*/
+/*===========*
+ * typedef's *
+ *===========*/
 
 typedef struct LogInfo_Tag {
-    LogVar       *t;                   /* Time log variable                   */
-    void         *x;                   /* State log variable                  */
+    LogVar       *t;		       /* Time log variable                   */
+    void         *x;		       /* State log variable                  */
     void         *sl;                  /* SigLog log variable                 */
-    int_T        ny;                   /* Length of "y" log variables         */
-    void         **y;                  /* Output log vars                     */
+    int_T        ny;	               /* Length of "y" log variables         */
+    void         **y;		       /* Output log vars                     */
     void         *xFinal;              /* Final state log variable            */
 
     LogVar       *logVarsList;         /* Linked list of all LogVars          */
@@ -85,7 +228,7 @@ typedef struct LogInfo_Tag {
 
 typedef struct MatItem_tag {
   int32_T    type;
-  uint32_T    nbytes;
+  int32_T    nbytes;
   const void *data;
 } MatItem;
 
@@ -121,22 +264,22 @@ static const char_T rtMemAllocError[] = "Memory allocation error";
 #error "Cannot Handle mxMAXNAM other than 32,64, and 128"
 
 #endif
-/* field names: for variable-size signal logging */
+/* field names: for vaiable-size signal logging */
 static const char_T rtStructLogVarFieldNames[] =
                   "time\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "signals\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "blockName\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD;
 static const char_T rtLocalLoggingSignalsStructFieldNames[] =
                   "values\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
-                  "valueDimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
-                  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
+		  "valueDimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
+		  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "label\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "title\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "plotStyle\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD;
 static const char_T rtGlobalLoggingSignalsStructFieldNames[] =
                   "values\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "valueDimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
-                  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
+		  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "label\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "blockName\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "stateName\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
@@ -158,13 +301,13 @@ static const char_T rtGlobalLoggingSignalsStructFieldNames[] =
 /* field names: for fixed-size signal logging */
 static const char_T rtLocalLoggingSignalsStructFieldNames_noValDims[] =
                   "values\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
-                  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
+		  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "label\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "title\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "plotStyle\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD;
 static const char_T rtGlobalLoggingSignalsStructFieldNames_noValDims[] =
                   "values\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
-                  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
+		  "dimensions\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "label\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "blockName\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
                   "stateName\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" ZERO_PAD
@@ -172,11 +315,34 @@ static const char_T rtGlobalLoggingSignalsStructFieldNames_noValDims[] =
 
 extern real_T rtInf; /* declared by rt_nonfinite.c */
 extern real_T rtNaN;
-extern real32_T rtNaNF;
+extern real_T rtNaNF;
 
 /*================*
  * Local routines *
  *================*/
+
+/* Forward declarations */
+LogVar *rt_CreateLogVarWithConvert(RTWLogInfo        *li,
+                                   const real_T      startTime,
+                                   const real_T      finalTime,
+                                   const real_T      inStepSize,
+                                   const char_T      **errStatus,
+                                   const char_T      *varName,
+                                   BuiltInDTypeId    inpDataTypeID,
+                                   const RTWLogDataTypeConvert *pDataTypeConvertInfo,
+                                   int_T             logical,
+                                   int_T             complex,
+                                   int_T             frameData,
+                                   int_T             nCols,
+                                   int_T             nDims,
+                                   const int_T       *dims,
+                                   LogValDimsStat    logVarDimsStat,
+                                   int_T             **currSigDims,
+                                   int_T             maxRows,
+                                   int_T             decimation,
+                                   real_T            sampleTime,
+                                   int_T             appanedToLogVarsList);
+
 
 /* Function: rt_GetSizeofDataType ==============================================
  * Abstract:
@@ -217,72 +383,13 @@ static size_t rt_GetSizeofDataType(BuiltInDTypeId dTypeID)
     }
     return(elSz);
 
-} /* end rt_GetSizeofDataType */
+} /* end: rt_GetSizeofDataType */
 
 
-/* Function: rt_GetSizeofComplexType ===========================================
+/* Function: rt_GetDataTypeConvertInfo
  * Abstract:
- *      Get the element size in bytes given the data type id.
- */
-static size_t rt_GetSizeofComplexType(BuiltInDTypeId dTypeID)
-{
-    size_t elSz = 2*rt_GetSizeofDataType(dTypeID);
-
-    switch (dTypeID) {
-      case SS_DOUBLE:
-      #ifdef CREAL_T
-        elSz = sizeof(creal_T);
-      #endif
-        break;
-      case SS_SINGLE:
-      #ifdef CREAL_T
-        elSz = sizeof(creal32_T);
-      #endif
-        break;
-      case SS_INT8:
-      #ifdef _CINT8_T
-        elSz = sizeof(cint8_T);
-      #endif
-        break;
-      case SS_UINT8:
-      #ifdef _CUINT8_T
-        elSz = sizeof(cuint8_T);
-      #endif
-        break;
-      case SS_INT16:
-      #ifdef _CINT16_T
-        elSz = sizeof(cint16_T);
-      #endif
-        break;
-      case SS_UINT16:
-      #ifdef _CUINT16_T
-        elSz = sizeof(cuint16_T);
-      #endif
-        break;
-      case SS_INT32:
-      #ifdef _CINT32_T
-        elSz = sizeof(cint32_T);
-      #endif
-        break;
-      case SS_UINT32:
-      #ifdef _CUINT32_T
-        elSz = sizeof(cuint32_T);
-      #endif
-        break;
-      case SS_BOOLEAN:
-        elSz = sizeof(boolean_T);
-        break;
-    }
-
-    return(elSz);
-
-} /* end rt_GetSizeofComplexType */
-
-
-/* Function: rt_GetDataTypeConvertInfo =========================================
- * Abstract:
- *      Directly copy if pointer to structure is non-NULL, otherwise set to
- *      default.
+ *     if pointer to structure is non-NULL then directly copy
+ *     otherwise set to default
  */
 static RTWLogDataTypeConvert rt_GetDataTypeConvertInfo(
     const RTWLogDataTypeConvert *pDataTypeConvertInfo,
@@ -291,7 +398,8 @@ static RTWLogDataTypeConvert rt_GetDataTypeConvertInfo(
 {
     RTWLogDataTypeConvert dataTypeConvertInfoCopy;
 
-    if (pDataTypeConvertInfo == NULL) {
+    if ( pDataTypeConvertInfo == NULL )
+    {
         dataTypeConvertInfoCopy.conversionNeeded = 0;
         dataTypeConvertInfoCopy.dataTypeIdLoggingTo = dTypeID;
         dataTypeConvertInfoCopy.dataTypeIdOriginal  = (DTypeId)dTypeID;
@@ -301,18 +409,15 @@ static RTWLogDataTypeConvert rt_GetDataTypeConvertInfo(
         dataTypeConvertInfoCopy.fracSlope = 1.0;
         dataTypeConvertInfoCopy.fixedExp = 0;
         dataTypeConvertInfoCopy.bias = 0.0;
-    } else {
+    }
+    else
+    {
         dataTypeConvertInfoCopy = *pDataTypeConvertInfo;
     }
 
     return dataTypeConvertInfoCopy;
+}
 
-} /* end rt_GetDataTypeConvertInfo */
-
-
-/* Function: rt_GetDblValueFromOverSizedData ===================================
- * Abstract:
- */
 static double rt_GetDblValueFromOverSizedData(
     const void *pVoid, 
     int bitsPerChunk, 
@@ -329,35 +434,41 @@ static double rt_GetDblValueFromOverSizedData(
     int i;    
     double isSignedNeg;
 
-    if(isSigned) {
+    if(isSigned)
+    {
         const chunk_T *pData = (const chunk_T *) (pVoid);
-        for (i = 0; i <numOfChunk; i++) {
+        for (i = 0; i <numOfChunk; i++)
+        {
             dblValue[i] = (double)(pData[i]);
         }
-    } else  {
+    }
+    else
+    {
         const uchunk_T *pData = (const uchunk_T *) (pVoid);
-        for (i = 0; i <numOfChunk; i++) {
+        for (i = 0; i <numOfChunk; i++)
+        {
             dblValue[i] = (double)(pData[i]);
         }
     }
 
     /* 
-       Assuming multi chunks b_n ... b_2 b_1 b_0, and the length of each chunk is N.
-       Suppose b_i is the i-th chunk's value.
-       Then for unsigned data or data with one chunk: we have
-       retValue = b_n * 2^(n*N) + ... + b_1 * 2^N + b_0 * 2^0;
-       But for signed data, we have
-       retValue = b_n * 2^(n*N) + ... + b_1 * 2^N + b_0 * 2^0+ (b_0<0) * 2^N + 
-       ... (b_(n-1) <0) * 2^(n*N) 
-       = (b_n + (b_(n-1)<0)) * 2^(n*N) +... + (b_1 + (b_0<0)) * 2^N + b_0 * 2^0;
-       Together:
-       retValue = 
-       (b_n + isSigned * (b_(n-1)<0)) * 2^(n*N) +... + (b_1 + isSigned * (b_0<0)) * 2^N + b_0 * 2^0;
+     Assuming multi chunks b_n ... b_2 b_1 b_0, and the length of each chunk is N.
+     Suppose b_i is the i-th chunk's value.
+     Then for unsigned data or data with one chunk: we have
+     retValue = b_n * 2^(n*N) + ... + b_1 * 2^N + b_0 * 2^0;
+     But for signed data, we have
+     retValue = b_n * 2^(n*N) + ... + b_1 * 2^N + b_0 * 2^0+ (b_0<0) * 2^N + 
+     ... (b_(n-1) <0) * 2^(n*N) 
+     = (b_n + (b_(n-1)<0)) * 2^(n*N) +... + (b_1 + (b_0<0)) * 2^N + b_0 * 2^0;
+     Together:
+     retValue = 
+     (b_n + isSigned * (b_(n-1)<0)) * 2^(n*N) +... + (b_1 + isSigned * (b_0<0)) * 2^N + b_0 * 2^0;
     */
 
     retValue = dblValue[numOfChunk - 1];
     
-    for(i = numOfChunk - 1; i > 0; i--) {
+    for(i = numOfChunk - 1; i > 0; i--)
+    {
         isSignedNeg = dblValue[i - 1] < 0 ? (double)isSigned : 0;
         retValue = retValue + isSignedNeg;
 
@@ -367,13 +478,11 @@ static double rt_GetDblValueFromOverSizedData(
 
     FREE(dblValue);
     return (retValue);
+}
 
-} /* end rt_GetDblValueFromOverSizedData */
-
-
-/* Function: rt_GetNonBoolMxIdFromDTypeId ======================================
+/* Function: rt_GetNonBoolMxIdFromDTypeId =====================================
  * Abstract:
- *      Get the mx???_CLASS given the simulink builtin data type id.
+ *      Get the mx???_CLASS given the simulink buildin data type id.
  */
 mxClassID rt_GetNonBoolMxIdFromDTypeId(BuiltInDTypeId dTypeID)
 {
@@ -414,20 +523,18 @@ mxClassID rt_GetNonBoolMxIdFromDTypeId(BuiltInDTypeId dTypeID)
 
     return(mxID);
 
-} /* end rt_GetNonBoolMxIdFromDTypeId */
+} /* end: rt_GetNonBoolMxIdFromDTypeId */
 
-
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-
-/* Function: rt_GetMxIdFromDTypeIdForRSim ======================================
+END_PUBLIC
+/* Function: rt_GetMxIdFromDTypeIdForRSim=======================================
  * Abstract:
- *      Get the mx???_CLASS given the simulink builtin data type id.
+ *      Get the mx???_CLASS given the simulink buildin data type id.
  */
-mxClassID rt_GetMxIdFromDTypeIdForRSim(BuiltInDTypeId dTypeID)
+PUBLIC mxClassID rt_GetMxIdFromDTypeIdForRSim(BuiltInDTypeId dTypeID)
 {
     mxClassID mxID;
 
@@ -439,26 +546,23 @@ mxClassID rt_GetMxIdFromDTypeIdForRSim(BuiltInDTypeId dTypeID)
 
     return(mxID);
 
-} /* end rt_GetMxIdFromDTypeIdForRSim */
-
-
+} /* end: rt_GetMxIdFromDTypeIdForRSim */
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
 
-
-
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-
+END_PUBLIC
 /* Function: rt_GetMxIdFromDTypeId =============================================
  * Abstract:
- *      Get the mx???_CLASS given the simulink builtin data type id.
+ *      Get the mx???_CLASS given the simulink buildin data type id.
  */
-mxClassID rt_GetMxIdFromDTypeId(BuiltInDTypeId dTypeID)
+PUBLIC mxClassID rt_GetMxIdFromDTypeId(BuiltInDTypeId dTypeID)
 {
     mxClassID mxID;
 
@@ -469,13 +573,12 @@ mxClassID rt_GetMxIdFromDTypeId(BuiltInDTypeId dTypeID)
     }
     return(mxID);
 
-} /* end rt_GetMxIdFromDTypeId */
-
-
+} /* end: rt_GetMxIdFromDTypeId */
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
-
+END_PUBLIC
 
 
 /* Function: rt_GetMatIdFromMxId ===============================================
@@ -531,14 +634,12 @@ static int_T rt_GetMatIdFromMxId(mxClassID mxID)
     }
     return(matID);
 
-} /* end rt_GetMatIdFromMxId */
+} /* end: rt_GetMatIdFromMxId */
 
 
-/* Forward declaration */
 static int_T rt_WriteItemToMatFile(FILE         *fp,
                                    MatItem      *pItem,
                                    ItemDataKind dataKind);
-
 
 /* Function: rt_ProcessMatItem =================================================
  * Abstract:
@@ -561,7 +662,7 @@ static int_T rt_ProcessMatItem(FILE         *fp,
     int32_T      *dims         = NULL;
     int32_T      _dims[3]      = {0, 0, 0};
     int32_T      nDims         = 2;
-    int32_T      nBytesInItem  = 0;
+    int_T        nBytesInItem  = 0;
     const char_T *itemName;
     MatItem      item;
     int_T        retStat       = 0;
@@ -580,21 +681,21 @@ static int_T rt_ProcessMatItem(FILE         *fp,
           arrayFlags[0]  = mxID;
           arrayFlags[0] |= var->logical;
           arrayFlags[0] |= var->complex;
-          if (var->nDims < 2) {
+	  if(var->nDims < 2){
               dims         = _dims;
-              dims[0]      = var->nRows;
-              dims[1]      = var->nCols;
-              nDims        = 2;
-          } else if (var->nDims >= 2) {
+	      dims[0]      = var->nRows;
+	      dims[1]      = var->nCols;
+	      nDims        = 2;
+	  }else if(var->nDims >= 2){
               int32_T k;
               dims = (int32_T*)malloc(sizeof(int32_T)*(var->nDims+1));
               for (k = 0; k < var->nDims; k++) {
                   dims[k] = var->dims[k];
               }
               dims[var->nDims] = var->nRows;
-              nDims = var->nDims + 1;
-          }
-          itemName = var->name;
+	      nDims = var->nDims + 1;
+	  }
+          itemName       = var->name;
           break;
       }
       case STRUCT_LOG_VAR_ITEM: {
@@ -654,7 +755,7 @@ static int_T rt_ProcessMatItem(FILE         *fp,
         nBytesInItem += matINT64_ALIGN(matTAG_SIZE + item.nbytes);
     }
     /* name */
-    item.nbytes = (int32_T)strlen(itemName);
+    item.nbytes = (int_T)strlen(itemName);
     if (cmd) {
         item.type = matINT8;
         item.data = (const char_T*) itemName;
@@ -673,7 +774,7 @@ static int_T rt_ProcessMatItem(FILE         *fp,
         size_t           elSize = var->elSize;
 
         /* data */
-        item.nbytes = (int32_T)(var->nRows * var->nCols * elSize);
+        item.nbytes = (int_T)(var->nRows * var->nCols * elSize);
         if (cmd) {
             item.type = matID;
             item.data = var->re;
@@ -687,7 +788,7 @@ static int_T rt_ProcessMatItem(FILE         *fp,
         }
         /* imaginary part */
         if (var->complex) {
-            item.nbytes = (int32_T)(var->nRows * var->nCols * elSize);
+            item.nbytes = (int_T)(var->nRows * var->nCols * elSize);
             if (cmd) {
                 item.type = matID;
                 item.data = var->im;
@@ -817,7 +918,7 @@ static int_T rt_ProcessMatItem(FILE         *fp,
           case SIGNALS_STRUCT_ITEM: {
               const SignalsStruct *var        = pItem->data;
               const LogVar        *values     = var->values;
-              const MatrixData    *dimensions = var->dimensions;
+	      const MatrixData    *dimensions = var->dimensions;
               const MatrixData    *labels     = var->labels;
               const MatrixData    *plotStyles = var->plotStyles;
               const MatrixData    *titles     = var->titles;
@@ -886,7 +987,7 @@ static int_T rt_ProcessMatItem(FILE         *fp,
                   }
                   values = values->next;
 
-                  /* dimensions */
+		  /* dimensions */
                   if (dimensions != NULL) {
                       item.type = matMATRIX;
                       item.data = &(dimensions[i]);
@@ -1025,7 +1126,8 @@ static int_T rt_ProcessMatItem(FILE         *fp,
     }
     return(retStat);
 
-} /* end rt_ProcessMatItem */
+} /* end: rt_ProcessMatItem */
+
 
 
 /* Function: rt_WriteItemToMatFile =============================================
@@ -1077,7 +1179,8 @@ static int_T rt_WriteItemToMatFile(FILE         *fp,
 
     return(0);
 
-} /* end rt_WriteItemToMatFile */
+} /* end: rt_WriteItemToMatFile */
+
 
 
 /* Function: rt_WriteMat5FileHeader ============================================
@@ -1117,14 +1220,15 @@ static int_T rt_WriteMat5FileHeader(FILE *fp)
     }
     return(nbytes != matVERSION_INFO_OFFSET + sizeof(ver));
 
-} /* end rt_WriteMat5FileHeader */
+} /* end: rt_WriteMat5FileHeader */
+
 
 
 /* Function: rt_FixupLogVar ====================================================
  * Abstract:
  *	Make the logged variable suitable for MATLAB.
  */
-static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
+static const char_T *rt_FixupLogVar(LogVar *var)
 {
     int_T  nCols   = var->data.nCols;
     int_T  maxRows = var->data.nRows;
@@ -1139,12 +1243,10 @@ static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
          * Warn the user the circular buffer has wrapped, implying that
          * some data has been lost.
          */
-        if( verbose) {
-            (void)fprintf(stdout,
-                          "*** Log variable %s has wrapped %d times\n"
-                          "    using a circular buffer of size %d\n",
-                          var->data.name, var->wrapped, var->data.nRows);
-        }
+        (void)fprintf(stdout,
+                      "*** Log variable %s has wrapped %d times\n"
+                      "    using a circular buffer of size %d\n",
+                      var->data.name, var->wrapped, var->data.nRows);
         if (var->usingDefaultBufSize) {
             /*
              * If wrapping occurred using the default buffer size,
@@ -1160,15 +1262,13 @@ static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
              * just warn the buffer wrapped and don't tell user they
              * can override the buffer size.
              */
-            if( verbose ) {
-                (void)fprintf(stdout,
-                              "*** To avoid wrapping, explicitly specify a\n"
-                              "    buffer size of %d in your Simulink model\n"
-                              "    by adding OPTS=\"-DDEFAULT_BUFFER_SIZE=%d\"\n"
-                              "    as an argument to the ConfigSet MakeCommand\n"
-                              "    parameter\n",
-                              var->nDataPoints, var->nDataPoints);
-            }
+            (void)fprintf(stdout,
+                          "*** To avoid wrapping, explicitly specify a\n"
+                          "    buffer size of %d in your Simulink model\n"
+                          "    by adding OPTS=\"-DDEFAULT_BUFFER_SIZE=%d\"\n"
+                          "    as an argument to the ConfigSet MakeCommand\n"
+                          "    parameter\n",
+                          var->nDataPoints, var->nDataPoints);
         }
     }
 
@@ -1221,7 +1321,8 @@ static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
             (void)fread(var->data.re, elSize, nEl, fptr);
             (void)fclose(fptr);
             (void)remove(fName);
-        } else {
+        }
+        else {
             for (k=0; k<nEl; k++) {
                 int_T kT   = nRows*(k%nCols) + (k/nCols);
                 char  *dst = pmT + kT*elSize;
@@ -1249,14 +1350,14 @@ static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
         char_T *buffer    = var->data.re;
         int_T  done       = 0; /* done: 0 (1) rotate real (imag) part. */
 
-        do {
+        do{
             char_T *col       = buffer;
             int_T  rowOffset  = (int_T)((nDims == 1) ? (elSize) : (elSize * nCols));
             int_T  colOffset  = (int_T)((nDims == 1)?  (nRows*elSize) : elSize);
             int_T  zeroIdx    = var->rowIdx;
             int_T  j;
 
-            for (j = 0 ; j < nCols; ++j, col += colOffset) {
+            for( j = 0 ; j < nCols; ++j, col += colOffset){
                 int_T   swapCount;
                 int_T   srcIdx;
                 int_T   dstIdx;
@@ -1266,24 +1367,26 @@ static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
                 for (tmpIdx=0, swapCount=0; swapCount < nRows; tmpIdx++) {
                     (void)memcpy(&tmp, col + tmpIdx*rowOffset, elSize);
 
-                    dstIdx=tmpIdx; 
-                    srcIdx = ((dstIdx + zeroIdx) % nRows);
-                    while (srcIdx != tmpIdx) {
+                    for (dstIdx=tmpIdx; ;swapCount++) {
+                        srcIdx = zeroIdx+dstIdx;
+                        if (srcIdx >= nRows) {
+                            srcIdx -= nRows;
+                        }
+                        if (srcIdx == tmpIdx) {
+                            (void)memcpy(col + dstIdx*rowOffset, &tmp, elSize);
+                            swapCount++;
+                            break;
+                        }
                         (void)memcpy(col + dstIdx*rowOffset,
                                      col + srcIdx*rowOffset,
                                      elSize);
-                        ++swapCount;
                         dstIdx = srcIdx;
-                        srcIdx = ((dstIdx + zeroIdx) % nRows);
-                        
                     }
-                    (void)memcpy(col + dstIdx*rowOffset, &tmp, elSize);
-                    ++swapCount;
                 }
             }
             done ++;
             /* need to rotate the imaginary part */
-        } while ((done == 1) && ((buffer = var->data.im) != NULL));
+        }while ((done == 1) && ((buffer = var->data.im) != NULL));
 
         var->rowIdx = 0;
     } /* Rotate? */
@@ -1328,15 +1431,17 @@ static const char_T *rt_FixupLogVar(LogVar *var,int verbose)
             }
         }
     }
-    return(NULL);
+
+     return(NULL);
 
 } /* end rt_FixupLogVar */
 
 
+
 /* Function: rt_LoadModifiedLogVarName =========================================
  * Abstract:
- *      The name of the logged variable is obtained from the input argument
- *      varName and the nameModifier which is obtained from the simstruct. If
+ *      The name of the logged variable is obtaind from the input argument
+ *      varName and the nameMmodifier which is obtained from the simstruct. If
  *      the nameModifier begins with an '_', then nameModifier is post-pended to
  *      varName to obtain the name of the logged variable. If the first
  *      character does not begin with an '_', then the nameModifier is
@@ -1370,8 +1475,8 @@ static void rt_LoadModifiedLogVarName(const RTWLogInfo *li,         /* in  */
         nameLen = (int_T)strlen(logVarName);
         (void)strncat(logVarName, varName, mxMAXNAM-1-nameLen);
     }
-
 } /* end rt_LoadModifiedLogVarName */
+
 
 
 /* Function: rt_GetActualDTypeID ===============================================
@@ -1383,18 +1488,19 @@ static void rt_LoadModifiedLogVarName(const RTWLogInfo *li,         /* in  */
 static BuiltInDTypeId rt_GetActualDTypeID(BuiltInDTypeId dTypeID)
 {
     /*LINTED E_FALSE_LOGICAL_EXPR*/
-    if (dTypeID == SS_DOUBLE && sizeof(real_T) != 8) {
+    if (dTypeID == SS_DOUBLE && sizeof(real_T) != sizeof(real64_T)) {
         return(SS_SINGLE);
     } else {
         return(dTypeID);
     }
-
 } /* end rt_GetActualDTypeID */
+
 
 
 /* Function: rt_DestroyLogVar ==================================================
  * Abstract:
  *      Destroy the log var linked list.
+ *
  */
 static void rt_DestroyLogVar(LogVar *head)
 {
@@ -1418,13 +1524,13 @@ static void rt_DestroyLogVar(LogVar *head)
 
         FREE(var);
     }
-
 } /* end rt_DestroyLogVar */
 
 
 /* Function: rt_DestroyStructLogVar ============================================
  * Abstract:
  *      Destroy the struct log var linked list.
+ *
  */
 static void rt_DestroyStructLogVar(StructLogVar *head)
 {
@@ -1441,7 +1547,7 @@ static void rt_DestroyStructLogVar(StructLogVar *head)
         rt_DestroyLogVar(var->signals.values);
         FREE(var->signals.labels);
         FREE(var->signals.plotStyles);
-        FREE(var->signals.dimensions);
+	FREE(var->signals.dimensions);
         FREE(var->signals.titles);
         FREE(var->signals.blockNames);
         FREE(var->signals.stateNames);
@@ -1449,7 +1555,6 @@ static void rt_DestroyStructLogVar(StructLogVar *head)
         FREE(var->blockName);
         FREE(var);
     }
-
 } /* end rt_DestroyStructLogVar */
 
 
@@ -1490,8 +1595,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
     const char_T         **stateNames  = sigInfo->stateNames.cptr;
     const boolean_T      *crossMdlRef  = sigInfo->crossMdlRef;
 
-    void                 **currSigDims = sigInfo->currSigDims;
-    int_T                *currSigDimsSize = sigInfo->currSigDimsSize;
+    int_T                **currSigDims = sigInfo->currSigDims;
     LogVar               *prevValues   = NULL;
     int_T                dimsOffset    = 0;
     boolean_T            *isVarDims    = sigInfo->isVarDims;
@@ -1546,7 +1650,6 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
                                             dims + dimsOffset,
                                             logValDimsStat,
                                             currSigDims + dimsOffset,
-                                            currSigDimsSize + dimsOffset,
                                             maxRows,decimation,sampleTime, 0);
 
         if (values == NULL) goto ERROR_EXIT;
@@ -1557,7 +1660,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
             prevValues->next = values;
         }
         prevValues = values;
-        dimsOffset += nd;
+	dimsOffset += nd;
     }
 
     if(logValueDimensions){
@@ -1571,15 +1674,15 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
     /* Dimensions */
     {
         real_T         *data;
-        size_t	       nbytes;
+	size_t	       nbytes;
         int_T          dataLen    = 0;
         BuiltInDTypeId dTypeId    = rt_GetActualDTypeID(SS_DOUBLE);
-        size_t         dataOffset = nSignals*sizeof(MatrixData);
+	size_t         dataOffset = nSignals*sizeof(MatrixData);
         uint_T         overhang   = (uint_T)(dataOffset % sizeof(real_T));
 
-        if (overhang) {
-            dataOffset += (sizeof(real_T) - overhang);
-        }
+	if (overhang) {
+	    dataOffset += (sizeof(real_T) - overhang);
+	}
         for (i=0; i< nSignals; i++) {
             int_T nd = (numDims) ? numDims[i] : 1;
             dataLen += nd;
@@ -1603,9 +1706,9 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
             mtxData->nRows   = 1;
             mtxData->nCols   = nd;
 
-            mtxData->nDims   = 1; /* assume */
+	    mtxData->nDims   = 1; /* assume */
             mtxData->dims    = mtxData->_dims;
-            mtxData->dims[0] = mtxData->nCols;
+	    mtxData->dims[0] = mtxData->nCols;
 
             mtxData->re      = data;
             mtxData->im      = NULL;
@@ -1621,7 +1724,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
     }
 
     /* labels */
-    if (labels != NULL) {
+    if (labels != NULL)     {
         short   *data;
         size_t  nbytes;
         int_T   dataLen    = 0;
@@ -1661,9 +1764,9 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
             mtxData->re      = data;
             mtxData->im      = NULL;
 
-            mtxData->nDims   = 1; /* assume */
+	    mtxData->nDims   = 1; /* assume */
             mtxData->dims    = mtxData->_dims;
-            mtxData->dims[0] = mtxData->nCols;
+	    mtxData->dims[0] = mtxData->nCols;
 
             mtxData->dTypeID = SS_INT16;
             mtxData->mxID    = mxCHAR_CLASS;
@@ -1679,17 +1782,17 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
     /* plot styles */
     if (plotStyles != NULL) {
         real_T         *data;
-        size_t	       nbytes;
+	size_t	       nbytes;
         int_T          dataLen    = 0;
         BuiltInDTypeId dTypeId    = rt_GetActualDTypeID(SS_DOUBLE);
         /*LINTED E_ASSIGN_INT_TO_SMALL_INT*/
-        size_t         dataOffset = nSignals*sizeof(MatrixData);
+	size_t         dataOffset = nSignals*sizeof(MatrixData);
         /*LINTED E_ASSIGN_INT_TO_SMALL_INT*/
         uint_T         overhang   = (uint_T)(dataOffset % sizeof(real_T));
 
-        if (overhang) {
-            dataOffset += (sizeof(real_T) - overhang);
-        }
+	if (overhang) {
+	    dataOffset += (sizeof(real_T) - overhang);
+	}
         for (i=0; i< nSignals; i++) {
             dataLen += numCols[i];
         }
@@ -1714,7 +1817,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
             mtxData->nRows   = (numCols[i]) ? 1 : 0;
             mtxData->nCols   = numCols[i];
 
-            mtxData->nDims   = numDims[i];
+	    mtxData->nDims   = numDims[i];
             
             if(mtxData->nDims > 2) {
                 if ((mtxData->dims = calloc(mtxData->nDims, sizeof(int_T))) == NULL) goto ERROR_EXIT;
@@ -1722,7 +1825,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
                 mtxData->dims    = mtxData->_dims;
             }
             
-            mtxData->dims[0] = *(dims + dimsOffset);
+	    mtxData->dims[0] = *(dims + dimsOffset);
             if(mtxData->nDims >= 2) {
                 int32_T j;
                 for (j=1; j<mtxData->nDims; j++) {
@@ -1780,9 +1883,9 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
                 mtxData->nCols   = dataLen;
             }
 
-            mtxData->nDims   = 1; /* assume */
+	    mtxData->nDims   = 1; /* assume */
             mtxData->dims    = mtxData->_dims;
-            mtxData->dims[0] = mtxData->nCols;
+	    mtxData->dims[0] = mtxData->nCols;
 
             mtxData->re      = data;
             mtxData->im      = NULL;
@@ -1838,9 +1941,9 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
             mtxData->nRows   = (blockNameLen) ? 1 : 0;
             mtxData->nCols   = blockNameLen;
 
-            mtxData->nDims   = 1; /* assume */
+	    mtxData->nDims   = 1; /* assume */
             mtxData->dims    = mtxData->_dims;
-            mtxData->dims[0] = mtxData->nCols;
+	    mtxData->dims[0] = mtxData->nCols;
 
             mtxData->re      = data;
             mtxData->im      = NULL;
@@ -1871,7 +1974,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
     }
 
     /* state names */
-    if (stateNames != NULL) {
+    if (stateNames != NULL)     {
         short  *data;
         size_t nbytes;
         int_T  dataLen = 0;
@@ -1911,9 +2014,9 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
             mtxData->nRows   = (stateNameLen) ? 1 : 0;
             mtxData->nCols   = stateNameLen;
 
-            mtxData->nDims   = 1; /* assume */
+	    mtxData->nDims   = 1; /* assume */
             mtxData->dims    = mtxData->_dims;
-            mtxData->dims[0] = mtxData->nCols;
+	    mtxData->dims[0] = mtxData->nCols;
 
             mtxData->re      = data;
             mtxData->im      = NULL;
@@ -1980,7 +2083,7 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
     
     return(NULL); /* NORMAL_EXIT */
 
-  ERROR_EXIT:
+ ERROR_EXIT:
 
     (void)fprintf(stderr, "*** Error creating signals structure "
                   "in the struct log variable %s\n", var->name);
@@ -2001,13 +2104,16 @@ static const char_T *rt_InitSignalsStruct(RTWLogInfo             *li,
 } /* end rt_InitSignalsStruct */
 
 
-/* Function: local_CreateStructLogVar ==========================================
+
+
+
+/* Function: local_CreateStructLogVar =============================================
  * Abstract:
- *      Create a logging variable in the structure format.
+ *	Create a logging variable in the structure format.
  *
  * Returns:
- *      ~= NULL  => success, returns the log variable created.
- *      == NULL  => failure, error message set in the simstruct.
+ *	~= NULL  => success, returns the log variable created.
+ *	== NULL  => failure, error message set in the simstruct.
  */
 static StructLogVar *local_CreateStructLogVar(
     RTWLogInfo              *li,
@@ -2039,14 +2145,14 @@ static StructLogVar *local_CreateStructLogVar(
     /* time field */
     if (logTime) {
         /* need to create a LogVar to log time */
-        int_T dims = 1;
+	int_T dims = 1;
         var->time = rt_CreateLogVarWithConvert(li, startTime, finalTime,
                                                inStepSize, errStatus,
                                                &TIME_FIELD_NAME, SS_DOUBLE, 
                                                NULL,
                                                0, 0, 0, 1,
                                                1, &dims, NO_LOGVALDIMS, 
-                                               NULL, NULL, maxRows,
+                                               NULL, maxRows,
                                                decimation, sampleTime, 0);
         if (var->time == NULL) goto ERROR_EXIT;
     } else {
@@ -2061,7 +2167,7 @@ static StructLogVar *local_CreateStructLogVar(
         (void)memcpy(time->name, &TIME_FIELD_NAME, mxMAXNAM);
         time->nRows   = 0;
         time->nCols   = 0;
-        time->nDims   = 0;
+	time->nDims   = 0;
         time->re      = NULL;
         time->im      = NULL;
         time->dTypeID = dt;
@@ -2100,9 +2206,9 @@ static StructLogVar *local_CreateStructLogVar(
         var->blockName->nRows   = (dataLen) ? 1 : 0;
         var->blockName->nCols   = dataLen;
 
-        var->blockName->nDims   = 1;
-        var->blockName->dims    = var->blockName->_dims;
-        var->blockName->dims[0] = dataLen;
+	var->blockName->nDims   = 1;
+	var->blockName->dims    = var->blockName->_dims;
+	var->blockName->dims[0] = dataLen;
         {
             /*LINTED E_BAD_PTR_CAST_ALIGN*/
             short *data = (short*)(((char_T*) (var->blockName))+dataOffset);
@@ -2150,367 +2256,13 @@ static StructLogVar *local_CreateStructLogVar(
 } /* end local_CreateStructLogVar */
 
 
-/* Function: rt_StartDataLoggingForOutput ======================================
- * Abstract:
- */
-const char_T *rt_StartDataLoggingForOutput(RTWLogInfo   *li,
-                                           const real_T startTime,
-                                           const real_T finalTime,
-                                           const real_T stepSize,
-                                           const char_T **errStatus)
-{
-    const char_T   *varName;
-    real_T         sampleTime = stepSize;
-    int_T          maxRows    = rtliGetLogMaxRows(li);
-    int_T          decimation = rtliGetLogDecimation(li);
-    int_T          logFormat  = rtliGetLogFormat(li);
-    boolean_T      logTime    = (logFormat==2) ? 1 : 0;
-
-    LogInfo *       logInfo;
-    logInfo = rtliGetLogInfo(li);
-
-    /* reset error status */
-    *errStatus = NULL;
-
-    /* outputs */
-    varName = rtliGetLogY(li);
-    if (varName[0] != '\0') {
-        int_T                  i;
-        int_T                  ny;
-        int_T                  yIdx;
-        char_T                 name[mxMAXNAM];
-        const char_T           *cp        = strchr(varName,',');
-        LogSignalPtrsType      ySigPtrs   = rtliGetLogYSignalPtrs(li);
-        const RTWLogSignalInfo *yInfo     = rtliGetLogYSignalInfo(li);
-
-        /* count the number of variables (matrices or structures) to create */
-        for (ny=1; cp != NULL; ny++) {
-            cp = strchr(cp+1,',');
-        }
-        logInfo->ny = ny;
-
-        if (logFormat==0) {
-            if ( (logInfo->y = calloc(ny,sizeof(LogVar*))) == NULL ) {
-                *errStatus = rtMemAllocError;
-                goto ERROR_EXIT;
-            }
-        } else {
-            if ( (logInfo->y = calloc(ny,sizeof(StructLogVar*))) == NULL ) {
-                *errStatus = rtMemAllocError;
-                goto ERROR_EXIT;
-            }
-        }
-
-        for (i = yIdx = 0, cp = varName; i < ny; i++) {
-            int_T        len;
-            const char_T *cp1 = strchr(cp+1,',');
-
-            if (cp1 != NULL) {
-                /*LINTED E_ASSIGN_INT_TO_SMALL_INT*/
-                len = (int_T)(cp1 - cp);
-                if (len >= mxMAXNAM) len = mxMAXNAM - 1;
-            } else {
-                len = mxMAXNAM - 1;
-            }
-            (void)strncpy(name, cp, len);
-            name[len] = '\0';
-
-            if (ny > 1 && ySigPtrs[i] == NULL) {
-                goto NEXT_NAME;
-            }
-
-            if (logFormat == 0) {
-                int            numCols;
-                int            nDims;
-                const int      *dims;
-                BuiltInDTypeId dataType;
-                int            isComplex;
-
-                if (ny == 1) {
-                    int_T op;
-
-                    numCols = yInfo[0].numCols[0];
-                    for (op = 1; op < yInfo[0].numSignals; op++) {
-                        numCols += yInfo[0].numCols[op];
-                    }
-                    /*
-                     * If we have only one "matrix" outport,
-                     * we can still log it as a matrix
-                     */
-                    if (yInfo[0].numSignals == 1) {
-                        nDims = yInfo[0].numDims[0];
-                        dims  = yInfo[0].dims;
-                    } else {
-                        nDims = 1;
-                        dims  = &numCols;
-                    }
-
-                    dataType  = yInfo[0].dataTypes[0];
-                    isComplex = yInfo[0].complexSignals[0];
-                } else {
-                    numCols   = yInfo[yIdx].numCols[0];
-                    nDims     = yInfo[yIdx].numDims[0];
-                    dims      = yInfo[yIdx].dims;
-                    dataType  = yInfo[yIdx].dataTypes[0];
-                    isComplex = yInfo[yIdx].complexSignals[0];
-                }
-
-                logInfo->y[yIdx] = rt_CreateLogVarWithConvert(
-                    li, startTime, finalTime,
-                    stepSize, errStatus,
-                    name,
-                    dataType,
-                    yInfo[yIdx].dataTypeConvert,
-                    0,isComplex,
-                    0,numCols,nDims,dims,
-                    NO_LOGVALDIMS, NULL, NULL,
-                    maxRows,decimation,
-                    sampleTime,1);
-                if (logInfo->y[yIdx] == NULL)  goto ERROR_EXIT;
-            } else {
-                logInfo->y[yIdx] = local_CreateStructLogVar(li, startTime,
-                                                            finalTime, stepSize,
-                                                            errStatus, name,
-                                                            logTime, maxRows,
-                                                            decimation, sampleTime,
-                                                            &yInfo[yIdx], NULL);
-                if (logInfo->y[yIdx] == NULL) goto ERROR_EXIT;
-            }
-            ++yIdx;
-        NEXT_NAME:
-            cp = cp1;
-            if (cp != NULL && *cp == ',') cp++;
-        }
-    }
-
-    return(NULL); /* NORMAL_EXIT */
-
- ERROR_EXIT:
-    (void)fprintf(stderr, "*** Errors occurred when starting data logging.\n");
-    if (*errStatus == NULL) {
-        *errStatus = rtMemAllocError;
-    }
-    if (logInfo) {
-        rt_DestroyLogVar(logInfo->logVarsList);
-        logInfo->logVarsList = NULL;
-        rt_DestroyStructLogVar(logInfo->structLogVarsList);
-        logInfo->structLogVarsList = NULL;
-        FREE(logInfo->y);
-        logInfo->y = NULL;
-    }
-    return(*errStatus);
-
-} /* end rt_StartDataLoggingForOutput */
-
-
-/* Function: rt_ReallocLogVar ==================================================
- * Abstract:
- *   Allocate more memory for the data buffers in the log variable.
- *   Exit if unable to allocate more memory.
- */
-void rt_ReallocLogVar(LogVar *var, boolean_T isVarDims)
-{
-    void *tmp;
-    int_T nCols = var->data.nCols;
-    int_T nRows = var->data.nRows + DEFAULT_BUFFER_SIZE;
-    size_t elSize = var->data.elSize;
-    
-    tmp = realloc(var->data.re, nRows*nCols*elSize);
-    if (tmp == NULL) {
-        (void)fprintf(stderr,
-                      "*** Memory allocation error.\n");
-        (void)fprintf(stderr, ""
-                      "    varName          = %s%s\n"
-                      "    nRows            = %d\n"
-                      "    nCols            = %d\n"
-                      "    elementSize      = %lu\n"
-                      "    Current Size     = %.16g\n"
-                      "    Failed resize    = %.16g\n\n",
-                      var->data.name,
-                      var->data.complex ? " (real part)" : "",
-                      var->data.nRows,
-                      var->data.nCols,
-                      (long)  var->data.elSize,
-                      (double)nRows*nCols*elSize,
-                      (double)(nRows+DEFAULT_BUFFER_SIZE)*nCols*elSize);
-        exit(1);
-    }
-    var->data.re = tmp;
-
-    if (var->data.complex) {
-        tmp = realloc(var->data.im, nRows*nCols*elSize);
-        if (tmp == NULL) {
-            (void)fprintf(stderr,
-                          "*** Memory allocation error.\n");
-            (void)fprintf(stderr, ""
-                          "    varName          = %s (complex part)\n"
-                          "    nRows            = %d\n"
-                          "    nCols            = %d\n"
-                          "    elementSize      = %lu\n"
-                          "    Current Size     = %.16g\n"
-                          "    Failed resize    = %.16g\n\n",
-                          var->data.name,
-                          var->data.nRows,
-                          var->data.nCols,
-                          (long)  var->data.elSize,
-                          (double)nRows*nCols*elSize,
-                          (double)(nRows+DEFAULT_BUFFER_SIZE)*nCols*elSize);
-            exit(1);
-        }
-        var->data.im = tmp;
-    }
-    var->data.nRows = nRows;
-
-    /* Also reallocate memory for "valueDimensions" 
-       when logging the variable-size signal
-    */
-    if(isVarDims){
-        int_T k;
-        
-        nCols = var->valDims->nCols;
-        nRows = var->valDims->nRows + DEFAULT_BUFFER_SIZE;
-        elSize = sizeof(real_T);
-        tmp = realloc(var->valDims->dimsData, nRows*nCols*elSize);
-        if (tmp == NULL) {
-            (void)fprintf(stderr,
-                          "*** Memory allocation error.\n");
-            (void)fprintf(stderr, ""
-                          "    varName          = %s\n"
-                          "    nRows            = %d\n"
-                          "    nCols            = %d\n"
-                          "    elementSize      = %lu\n"
-                          "    Current Size     = %.16g\n"
-                          "    Failed resize    = %.16g\n\n",
-                          var->valDims->name,
-                          var->valDims->nRows,
-                          var->valDims->nCols,
-                          (long)  elSize,
-                          (double)nRows*nCols*elSize,
-                          (double)(nRows+DEFAULT_BUFFER_SIZE)*nCols*elSize);
-            exit(1);
-        }
-
-        /*
-         * valueDimensions data is stored in array format and must be
-         * adjusted after reallocation (see also rt_FixupLogVar())
-         *
-         * Example: maxRows = 4; nRows = 4; nDims = 3;
-         * Before realloc of the logVar, the locations of data are as below:
-         * (x, y, z -- useful data / o -- junk, don't care)
-         * a[0] = x    a[4] = y    a[8] = z
-         * a[1] = x    a[5] = y    a[9] = z
-         * a[2] = x    a[6] = y    a[10]= z
-         * a[3] = x    a[7] = y    a[11]= z
-         *
-         * After realloc of the logVar (suppose 2 extra rows are added),
-         * the locations of data are as below:
-         * a[0] = x    a[6] = y    a[12]= o
-         * a[1] = x    a[7] = y    a[13]= o
-         * a[2] = x    a[8] = z    a[14]= o
-         * a[3] = x    a[9] = z    a[15]= o
-         * a[4] = y    a[10]= z    a[16]= o
-         * a[5] = y    a[11]= z    a[17]= o
-         *
-         * The data must be adjusted as below:
-         * a[0] = x    a[6] = y    a[12]= z
-         * a[1] = x    a[7] = y    a[13]= z
-         * a[2] = x    a[8] = y    a[14]= z
-         * a[3] = x    a[9] = y    a[15]= z
-         * a[4] = o    a[10]= o    a[16]= o
-         * a[5] = o    a[11]= o    a[17]= o
-         */
-        for(k = var->data.nDims-1; k > 0; k--){
-            (void) memcpy((real_T*)tmp + k*nRows, 
-                          (real_T*)tmp + k*var->valDims->nRows,
-                          elSize * var->valDims->nRows);
-        }
-
-        var->valDims->dimsData = tmp;
-        var->valDims->nRows = nRows;
-    }
-
-} /* end rt_ReallocLogVar */
-
-
-/* Function: rt_UpdateLogVarWithDiscontiguousData ==============================
- * Abstract:
- *      Log one row of the LogVar with data that is not contiguous.
- */
-void rt_UpdateLogVarWithDiscontiguousData(LogVar            *var,
-                                          LogSignalPtrsType data,
-                                          const int_T       *segmentLengths,
-                                          int_T             nSegments)
-{
-    size_t elSize = 0;
-    int_T  offset = 0;
-    int    segIdx = 0;
-
-    if (++var->numHits % var->decimation) return;
-    var->numHits = 0;
-
-    /*
-     * Reallocate or wrap the LogVar
-     */
-    if (var->rowIdx == var->data.nRows) {
-        if (var->okayToRealloc == 1) {
-            rt_ReallocLogVar(var, false);
-        } else {
-            /* Circular buffer */
-            var->rowIdx = 0;
-            ++(var->wrapped); /* increment the wrap around counter */
-        }
-    }
-
-    /* This function is only used to log states, there's no var-dims issue. */
-    elSize = var->data.elSize;
-    offset = (int_T)(elSize * var->rowIdx * var->data.nCols);
-
-    if (var->data.complex) {
-        char_T *dstRe = (char_T*)(var->data.re) + offset;
-        char_T *dstIm = (char_T*)(var->data.im) + offset;
-
-        for (segIdx = 0; segIdx < nSegments; segIdx++) {
-            int_T         nEl  = segmentLengths[segIdx];
-            const  char_T *src = (const void *)data[segIdx];
-            int_T         el;
-
-            for (el = 0; el < nEl; el++) {
-                (void)memcpy(dstRe, src, elSize);
-                dstRe += elSize;   src += elSize;
-                (void)memcpy(dstIm, src, elSize);
-                dstIm += elSize;   src += elSize;
-            }
-        }
-    } else {
-        char_T *dst = (char_T*)(var->data.re) + offset;
-
-        for (segIdx = 0; segIdx < nSegments; segIdx++) {
-            size_t      segSize = elSize*segmentLengths[segIdx];
-            const  void *src    = data[segIdx];
-
-            (void)memcpy(dst, src, segSize);
-            dst += segSize;
-        }
-    }
-
-    ++var->rowIdx;
-    return;
-
-} /* end rt_UpdateLogVarWithDiscontiguousData */
-
-
 /*==================*
  * Visible routines *
  *==================*/
 
 
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
- 
-/* Function: rt_CreateLogVarWithConvert ========================================
+/* Function: rt_CreateLogVarWithConvert ======================================
  * Abstract:
  *	Create a logging variable.
  *
@@ -2518,7 +2270,14 @@ extern "C" {
  *	~= NULL  => success, returns the log variable created.
  *	== NULL  => failure, error message set in the simstruct.
  */
-LogVar *rt_CreateLogVarWithConvert(
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+ 
+PUBLIC LogVar *rt_CreateLogVarWithConvert(
     RTWLogInfo        *li,
     const real_T      startTime,
     const real_T      finalTime,
@@ -2534,19 +2293,14 @@ LogVar *rt_CreateLogVarWithConvert(
     int_T             nDims,
     const int_T       *dims,
     LogValDimsStat    logValDimsStat,
-    void              **currSigDims,
-    int_T             *currSigDimsSize,
+    int_T             **currSigDims,
     int_T             maxRows,
     int_T             decimation,
     real_T            sampleTime,
-    int_T             appendToLogVarsList)
+    int_T             appanedToLogVarsList)
 {
     int_T          usingDefaultBufSize = 0;
-#ifdef NO_LOGGING_REALLOC
     int_T          okayToRealloc       = 0;
-#else
-    int_T          okayToRealloc       = 1;
-#endif
     LogVar         *var                = NULL;
     /*inpDataTypeID is the rt_LoggedOutputDataTypeId*/
     BuiltInDTypeId dTypeID             = (BuiltInDTypeId)inpDataTypeID; 
@@ -2561,10 +2315,10 @@ LogVar *rt_CreateLogVarWithConvert(
     frameSize = frameData ? dims[0] : 1;
 
     /*===================================================================*
-     * Calculate maximum number of rows needed in the buffer             *
+     * Try to figure out the maximum number of rows needed in the buffer *
      *===================================================================*/
 
-    if (finalTime > startTime && finalTime != rtInf) {
+    if (finalTime > 0.0 && finalTime != rtInf) {
         real_T nPoints;            /* Tfinal is finite  ===>  nRows can be  */
         real_T stepSize;           /* computed since the StepSize is fixed  */
 
@@ -2613,7 +2367,7 @@ LogVar *rt_CreateLogVarWithConvert(
             nRows = maxRows;
             okayToRealloc = 0;
         }
-    } else if (finalTime == startTime) {
+    } else if (finalTime == 0.0) {
         /*
          * Number of rows to log is equal to 1 if not frame-based and
          * equal to frame size if frame-based
@@ -2626,11 +2380,10 @@ LogVar *rt_CreateLogVarWithConvert(
          */
         if ((maxRows > 0) && (maxRows < nRows)) {
             nRows = maxRows;
-            okayToRealloc = 0;
         }
     } else if (maxRows > 0) {     /* maxRows is specified => nRows=maxRows  */
         nRows = maxRows;
-        okayToRealloc = 0;
+
     } else {
 
         if (inStepSize == 0) {
@@ -2640,7 +2393,6 @@ LogVar *rt_CreateLogVarWithConvert(
         } else {                    /* Use a default value for nRows          */
             usingDefaultBufSize = 1;
             nRows = DEFAULT_BUFFER_SIZE;
-            okayToRealloc = 0;  /* No realloc with infinite stop time */
             (void)fprintf(stdout, "*** Using a default buffer of size %d for "
                           "logging variable %s\n", nRows, varName);
         }
@@ -2725,7 +2477,7 @@ LogVar *rt_CreateLogVarWithConvert(
     /*
      * Initialize the fields in LogVar structure.
      */
-    if (appendToLogVarsList) {
+    if (appanedToLogVarsList) {
         rt_LoadModifiedLogVarName(li,varName,var->data.name);
     } else {
         var->data.name[mxMAXNAM-1] = '\0';
@@ -2771,48 +2523,44 @@ LogVar *rt_CreateLogVarWithConvert(
         var->currStrides = NULL;
     }
     else{
-        if ( (var->valDims = calloc(1, sizeof(ValDimsData))) == NULL ) {
+        if ( (var->valDims = calloc(1, sizeof(ValDimsData))) == NULL ) 
             goto ERROR_EXIT;
-        }
-
         (void)memcpy(var->valDims->name, &VALUEDIMENSIONS_FIELD_NAME, mxMAXNAM);
 
-        if (logValDimsStat == LOGVALDIMS_EMPTYMX) {
-            /* At least one signal is variable-size, 
-               but the current signal is fixed-size. 
-               Therefore, create a dummy MatrixData to write out valueDimensions 
-               as an empty matrix. 
-            */
+        if(logValDimsStat == LOGVALDIMS_EMPTYMX){
+        /* At least one signal is variable-size, 
+           but the current signal is fixed-size. 
+           Therefore, create a dummy MatrixData to write out valueDimensions 
+           as an empty matrix. 
+        */
             var->valDims->nRows = 0;
             var->valDims->nCols = 0;
             var->valDims->currSigDims = NULL;
-            var->valDims->currSigDimsSize = NULL;
             var->valDims->dimsData = NULL;
             /* Set these pointers to NULLs in this case */
             var->coords      = NULL;
             var->strides     = NULL;
             var->currStrides = NULL;
-        } else { /* The current signal is a variable-size signal. */
+        }
+        else{ /* The current signal is a variable-size signal. */
             /* The "valueDimensions" must be double, so re-assign element size */
             elementSize = sizeof(real_T);
-
             /* When signals are frame-based, 'valueDimensions' has 1 column */
             if(frameData){
-                /* When signal is frame-based, the first dimension is always fixed, 
-                   so we only need to record the second dimension.
-                   e.g. Two frame-based signals [10x4] and [10x3], 
-                   'valueDimensions' and 'currSigDims'
-                   only record 4 or 3.
-                */
+               /* When signal is frame-based, the first dimension is always fixed, 
+                  so we only need to record the second dimension.
+                  e.g. Two frame-based signals [10x4] and [10x3], 
+                  'valueDimensions' and 'currSigDims'
+                  only record 4 or 3.
+               */
                 nColumns = 1;
-                var->valDims->currSigDims = (void**) (currSigDims + 1);
-                var->valDims->currSigDimsSize = (int_T*) (currSigDimsSize + 1);
-            } else { /* non-frame based */
-                nColumns = nDims;
-                var->valDims->currSigDims = (void**) currSigDims;
-                var->valDims->currSigDimsSize = (int_T*) currSigDimsSize;
+                var->valDims->currSigDims = (int_T**) (currSigDims + 1);
             }
-            
+            else{ /* non-frame based */
+                nColumns = nDims;
+                var->valDims->currSigDims = (int_T**) currSigDims; 
+            }
+
             /* Allocate memory for the circular buffer */
             if ( (var->valDims->dimsData = malloc(nRows*nColumns*elementSize)) == NULL ) {
                 (void)fprintf(stderr,
@@ -2830,7 +2578,7 @@ LogVar *rt_CreateLogVarWithConvert(
             var->valDims->nRows = nRows;
             var->valDims->nCols = nColumns;
 
-            /* Allocate memory for these dynamic arrays */
+            /* Allocate memeory for these dynamic arrays */
             {
                 size_t nbytes = var->data.nDims*sizeof(int_T);
                 if( ((var->coords = calloc(nbytes, 1)) == NULL)
@@ -2838,8 +2586,10 @@ LogVar *rt_CreateLogVarWithConvert(
                     ||((var->currStrides = calloc(nbytes, 1)) == NULL) )
                     goto ERROR_EXIT;
             }
+
         }
     }
+
 
     var->rowIdx               = 0;
     var->wrapped              = 0;
@@ -2850,7 +2600,7 @@ LogVar *rt_CreateLogVarWithConvert(
     var->numHits              = -1;  /* so first point gets logged */
 
     /* Add this log var to list in log info, if necessary */
-    if (appendToLogVarsList) {
+    if (appanedToLogVarsList) {
         LogInfo *logInfo = (LogInfo*) rtliGetLogInfo(li);
         LogVar  *varList = logInfo->logVarsList;
 
@@ -2874,18 +2624,11 @@ LogVar *rt_CreateLogVarWithConvert(
 
 } /* end rt_CreateLogVarWithConvert */
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
-
-
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
+END_PUBLIC
 
 /* Function: rt_CreateLogVar ===================================================
  * Abstract:
@@ -2895,7 +2638,14 @@ extern "C" {
  *	~= NULL  => success, returns the log variable created.
  *	== NULL  => failure, error message set in the simstruct.
  */
-LogVar *rt_CreateLogVar(RTWLogInfo        *li,
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+
+PUBLIC LogVar *rt_CreateLogVar(RTWLogInfo        *li,
                                const real_T      startTime,
                                const real_T      finalTime,
                                const real_T      inStepSize,
@@ -2909,12 +2659,11 @@ LogVar *rt_CreateLogVar(RTWLogInfo        *li,
                                int_T             nDims,
                                const int_T       *dims,
                                LogValDimsStat    logValDimsStat,
-                               void              **currSigDims,
-                               int_T             *currSigDimsSize,
+                               int_T             **currSigDims,
                                int_T             maxRows,
                                int_T             decimation,
                                real_T            sampleTime,
-                               int_T             appendToLogVarsList)
+                               int_T             appanedToLogVarsList)
 {
     const RTWLogDataTypeConvert *pDataTypeConvertInfo = NULL;
 
@@ -2934,26 +2683,18 @@ LogVar *rt_CreateLogVar(RTWLogInfo        *li,
                                       dims,
                                       logValDimsStat,
                                       currSigDims,
-                                      currSigDimsSize,
                                       maxRows,
                                       decimation,
                                       sampleTime,
-                                      appendToLogVarsList);
+                                      appanedToLogVarsList);
 
 } /* end rt_CreateLogVar */
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
-
-
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
+END_PUBLIC
 
 /* Function: rt_CreateStructLogVar =============================================
  * Abstract:
@@ -2963,7 +2704,14 @@ extern "C" {
  *	~= NULL  => success, returns the log variable created.
  *	== NULL  => failure, error message set in the simstruct.
  */
-StructLogVar *rt_CreateStructLogVar(RTWLogInfo              *li,
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+
+PUBLIC StructLogVar *rt_CreateStructLogVar(RTWLogInfo              *li,
                                            const real_T            startTime,
                                            const real_T            finalTime,
                                            const real_T            inStepSize,
@@ -2992,20 +2740,165 @@ StructLogVar *rt_CreateStructLogVar(RTWLogInfo              *li,
 
 } /* end rt_CreateStructLogVar */
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
+
+const char_T *rt_StartDataLoggingForOutput(RTWLogInfo   *li,
+                                           const real_T startTime,
+                                           const real_T finalTime,
+                                           const real_T stepSize,
+                                           const char_T **errStatus)
+{
+    const char_T   *varName;
+    real_T         sampleTime = stepSize;
+    int_T          maxRows    = rtliGetLogMaxRows(li);
+    int_T          decimation = rtliGetLogDecimation(li);
+    int_T          logFormat  = rtliGetLogFormat(li);
+    boolean_T      logTime    = (logFormat==2) ? 1 : 0;
+
+    LogInfo *       logInfo;
+    logInfo = rtliGetLogInfo(li);
+
+    /* reset error status */
+    *errStatus = NULL;
+
+
+    /* outputs */
+    varName = rtliGetLogY(li);
+    if (varName[0] != '\0') {
+        int_T                  i;
+        int_T                  ny;
+        int_T                  yIdx;
+        char_T                 name[mxMAXNAM];
+        const char_T           *cp        = strchr(varName,',');
+        LogSignalPtrsType      ySigPtrs   = rtliGetLogYSignalPtrs(li);
+        const RTWLogSignalInfo *yInfo     = rtliGetLogYSignalInfo(li);
+
+        /* count the number of variables (matrices or structures) to create */
+        for (ny=1; cp != NULL; ny++) {
+            cp = strchr(cp+1,',');
+        }
+        logInfo->ny = ny;
+
+        if (logFormat==0) {
+            if ( (logInfo->y = calloc(ny,sizeof(LogVar*))) == NULL ) {
+                *errStatus = rtMemAllocError;
+                goto ERROR_EXIT;
+            }
+        } else {
+            if ( (logInfo->y = calloc(ny,sizeof(StructLogVar*))) == NULL ) {
+                *errStatus = rtMemAllocError;
+                goto ERROR_EXIT;
+            }
+        }
+
+        for (i = yIdx = 0, cp = varName; i < ny; i++) {
+            int_T        len;
+            const char_T *cp1 = strchr(cp+1,',');
+
+            if (cp1 != NULL) {
+                /*LINTED E_ASSIGN_INT_TO_SMALL_INT*/
+                len = (int_T)(cp1 - cp);
+                if (len >= mxMAXNAM) len = mxMAXNAM - 1;
+            } else {
+                len = mxMAXNAM - 1;
+            }
+            (void)strncpy(name, cp, len);
+            name[len] = '\0';
+
+            if (ny > 1 && ySigPtrs[i] == NULL) {
+                goto NEXT_NAME;
+            }
+
+            if (logFormat == 0) {
+                int            numCols;
+		int            nDims;
+		const int      *dims;
+                BuiltInDTypeId dataType;
+                int            isComplex;
+
+                if (ny == 1) {
+                    int_T op;
+
+                    numCols = yInfo[0].numCols[0];
+                    for (op = 1; op < yInfo[0].numSignals; op++) {
+                        numCols += yInfo[0].numCols[op];
+                    }
+                    /*
+                     * If we have only one "matrix" outport,
+                     * we can still log it as a matrix
+                     */
+		    if(yInfo[0].numSignals == 1){
+			nDims     = yInfo[0].numDims[0];
+			dims      = yInfo[0].dims;
+		    }else{
+			nDims     = 1;
+			dims      = &numCols;
+		    }
+                    dataType  = yInfo[0].dataTypes[0];
+                    isComplex = yInfo[0].complexSignals[0];
+
+                } else {
+                    numCols   = yInfo[yIdx].numCols[0];
+		    nDims     = yInfo[yIdx].numDims[0];
+		    dims      = yInfo[yIdx].dims;
+                    dataType  = yInfo[yIdx].dataTypes[0];
+                    isComplex = yInfo[yIdx].complexSignals[0];
+                }
+
+                logInfo->y[yIdx] = rt_CreateLogVarWithConvert(
+                    li, startTime, finalTime,
+                    stepSize, errStatus,
+                    name,
+                    dataType,
+                    yInfo[yIdx].dataTypeConvert,
+                    0,isComplex,
+                    0,numCols,nDims,dims,
+                    NO_LOGVALDIMS, NULL, 
+                    maxRows,decimation,
+                    sampleTime,1);
+                if (logInfo->y[yIdx] == NULL)  goto ERROR_EXIT;
+            } else {
+                logInfo->y[yIdx] = local_CreateStructLogVar(li, startTime,
+                                                            finalTime, stepSize,
+                                                            errStatus, name,
+                                                            logTime, maxRows,
+                                                            decimation, sampleTime,
+                                                            &yInfo[yIdx], NULL);
+                if (logInfo->y[yIdx] == NULL) goto ERROR_EXIT;
+            }
+            ++yIdx;
+        NEXT_NAME:
+            cp = cp1;
+            if (cp != NULL && *cp == ',') cp++;
+        }
+    }
+
+    return(NULL); /* NORMAL_EXIT */
+
+ ERROR_EXIT:
+    (void)fprintf(stderr, "*** Errors occurred when starting data logging.\n");
+    if (*errStatus == NULL) {
+        *errStatus = rtMemAllocError;
+    }
+    if (logInfo) {
+        rt_DestroyLogVar(logInfo->logVarsList);
+        logInfo->logVarsList = NULL;
+        rt_DestroyStructLogVar(logInfo->structLogVarsList);
+        logInfo->structLogVarsList = NULL;
+        FREE(logInfo->y);
+        logInfo->y = NULL;
+    }
+    return(*errStatus);
+
+}
 
 
 
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
- 
-/* Function: rt_StartDataLoggingWithStartTime ==================================
+/* Function: rt_StartDataLogging ===============================================
  * Abstract:
  *      Initialize data logging info based upon the following settings cached
  *      in the RTWLogging data structure of the SimStruct.
@@ -3015,11 +2908,18 @@ extern "C" {
  *	!= NULL  => failure (the return value is a pointer that points to the
  *                           error message, which is also set in the simstruct)
  */
-const char_T *rt_StartDataLoggingWithStartTime(RTWLogInfo   *li,
-                                                      const real_T startTime,
-                                                      const real_T finalTime,
-                                                      const real_T stepSize,
-                                                      const char_T **errStatus)
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+ 
+PUBLIC const char_T *rt_StartDataLoggingWithStartTime(RTWLogInfo   *li,
+                                               const real_T startTime,
+                                               const real_T finalTime,
+                                               const real_T stepSize,
+                                               const char_T **errStatus)
 {
     const char_T   *varName;
     LogInfo        *logInfo;
@@ -3047,7 +2947,7 @@ const char_T *rt_StartDataLoggingWithStartTime(RTWLogInfo   *li,
                                                 varName,SS_DOUBLE,
                                                 NULL,
                                                 0,0,0,1,1,
-                                                &dims, NO_LOGVALDIMS, NULL, NULL,
+                                                &dims, NO_LOGVALDIMS, NULL, 
                                                 maxRows,decimation,
                                                 sampleTime,1);
         if (logInfo->t == NULL) goto ERROR_EXIT;
@@ -3091,7 +2991,7 @@ const char_T *rt_StartDataLoggingWithStartTime(RTWLogInfo   *li,
                                                         pDTConvInfo,
                                                         0,
                                                         isComplex,0,numCols,nDims,dims,
-                                                        NO_LOGVALDIMS, NULL, NULL,
+                                                        NO_LOGVALDIMS, NULL,
                                                         maxRows,decimation,sampleTime,1);
                 if (logInfo->x == NULL)  goto ERROR_EXIT;
             }
@@ -3102,7 +3002,7 @@ const char_T *rt_StartDataLoggingWithStartTime(RTWLogInfo   *li,
                                                              pDTConvInfo,
                                                              0,isComplex,0,numCols,nDims,
                                                              dims, NO_LOGVALDIMS, NULL, 
-                                                             NULL, 1,decimation,
+                                                             1,decimation,
                                                              sampleTime,1);
                 if (logInfo->xFinal == NULL)  goto ERROR_EXIT;
             }
@@ -3159,25 +3059,26 @@ const char_T *rt_StartDataLoggingWithStartTime(RTWLogInfo   *li,
     }
     return(*errStatus);
 
-} /* end rt_StartDataLoggingWithStartTime */
+} /* end rt_StartDataLogging */
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
 
 
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 extern "C" {
 #endif
+END_PUBLIC
 
-
-/* Function: rt_StartDataLogging ===============================================
- * Abstract:
- */
-const char_T *rt_StartDataLogging(RTWLogInfo   *li,
+BEGIN_PUBLIC
+#if MAT_FILE == 1
+END_PUBLIC
+PUBLIC const char_T *rt_StartDataLogging(RTWLogInfo   *li,
                                          const real_T finalTime,
                                          const real_T stepSize,
                                          const char_T **errStatus)
@@ -3188,25 +3089,121 @@ const char_T *rt_StartDataLogging(RTWLogInfo   *li,
                                             stepSize,
                                             errStatus);
 }
+BEGIN_PUBLIC
+#else
+#define rt_StartDataLogging(li, finalTime, stepSize, errStatus) NULL /* do nothing */
+#endif
+END_PUBLIC
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
+
+/* Function: rt_ReallocLogVar ==================================================
+ * Abstract:
+ *   Allocate more momemory for the data buffers in the log variable.
+ *   Exit if unable to allocate more memory.
+ */
+void rt_ReallocLogVar(LogVar *var, boolean_T isVarDims)
+{
+    void *tmp;
+    int_T nCols = var->data.nCols;
+    int_T nRows = var->data.nRows + DEFAULT_BUFFER_SIZE;
+    size_t elSize = var->data.elSize;
+    
+    tmp = realloc(var->data.re, nRows*nCols*elSize);
+    if (tmp == NULL) {
+        (void)fprintf(stderr,
+                      "*** Memory allocation error.\n");
+        (void)fprintf(stderr, ""
+                      "    varName          = %s%s\n"
+                      "    nRows            = %d\n"
+                      "    nCols            = %d\n"
+                      "    elementSize      = %lu\n"
+                      "    Current Size     = %.16g\n"
+                      "    Failed resize    = %.16g\n\n",
+                      var->data.name,
+                      var->data.complex ? " (real part)" : "",
+                      var->data.nRows,
+                      var->data.nCols,
+                      (long)  var->data.elSize,
+                      (double)nRows*nCols*elSize,
+                      (double)(nRows+DEFAULT_BUFFER_SIZE)*nCols*elSize);
+        exit(1);
+    }
+    var->data.re = tmp;
+
+    if (var->data.complex) {
+        tmp = realloc(var->data.im, nRows*nCols*elSize);
+        if (tmp == NULL) {
+            (void)fprintf(stderr,
+                          "*** Memory allocation error.\n");
+            (void)fprintf(stderr, ""
+                          "    varName          = %s (complex part)\n"
+                          "    nRows            = %d\n"
+                          "    nCols            = %d\n"
+                          "    elementSize      = %lu\n"
+                          "    Current Size     = %.16g\n"
+                          "    Failed resize    = %.16g\n\n",
+                          var->data.name,
+                          var->data.nRows,
+                          var->data.nCols,
+                          (long)  var->data.elSize,
+                          (double)nRows*nCols*elSize,
+                          (double)(nRows+DEFAULT_BUFFER_SIZE)*nCols*elSize);
+            exit(1);
+        }
+        var->data.im = tmp;
+    }
+    var->data.nRows = nRows;
+
+    /* Also reallocate memory for "valueDimensions" 
+       when logging the variable-size signal
+    */
+    if(isVarDims){
+        nCols = var->valDims->nCols;
+        nRows = var->valDims->nRows + DEFAULT_BUFFER_SIZE;
+        elSize = sizeof(real_T);
+        tmp = realloc(var->valDims->dimsData, nRows*nCols*elSize);
+        if (tmp == NULL) {
+            (void)fprintf(stderr,
+                          "*** Memory allocation error.\n");
+            (void)fprintf(stderr, ""
+                          "    varName          = %s\n"
+                          "    nRows            = %d\n"
+                          "    nCols            = %d\n"
+                          "    elementSize      = %lu\n"
+                          "    Current Size     = %.16g\n"
+                          "    Failed resize    = %.16g\n\n",
+                          var->valDims->name,
+                          var->valDims->nRows,
+                          var->valDims->nCols,
+                          (long)  elSize,
+                          (double)nRows*nCols*elSize,
+                          (double)(nRows+DEFAULT_BUFFER_SIZE)*nCols*elSize);
+            exit(1);
+        }
+        var->valDims->dimsData = tmp;
+        var->valDims->nRows = nRows;
+    }
+
+} /* end rt_ReallocLogVar */
 
 
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
- 
 /* Function: rt_UpdateLogVar ===================================================
  * Abstract:
  *	Called to log data for a log variable.
  */
-void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
+ 
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+ 
+PUBLIC void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
 {
     size_t        elSize    = var->data.elSize;
     const  char_T *cData    = data;
@@ -3218,7 +3215,7 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
     int_T  offset        = 0;
     char_T *currRealRow  = NULL;
     char_T *currImagRow  = NULL;
-    int_T  pointSize     = (int_T)((var->data.complex) ? rt_GetSizeofComplexType(dTypeID) : elSize);
+    int_T  pointSize     = (int_T)((var->data.complex) ? 2*elSize : elSize);
 
     int    i, j, k;
 
@@ -3226,8 +3223,7 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
        logging variable-size signals */
     const  int_T  nDims = var->data.nDims;
     const  int_T  *dims = var->data.dims;
-    const  void   * const *currDimsPtr = NULL;
-    const  int_T  *currDimsSizePtr = NULL;
+    const  int_T  **currDimsPtr = NULL;
 
     /* The following variables will be used for 
        logging "valueDimensions" field */
@@ -3238,46 +3234,24 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
     int_T  nRows_valDims    = 0;
     int_T  logWidth_valDims = 0;
 
+    if(isVarDims){
+        currDimsPtr = (const int_T**) var->valDims->currSigDims;
+        logWidth_valDims = frameData ? 1 : var->valDims->nCols;
+        nRows_valDims = var->valDims->nRows;
+
+        var->strides[0] = 1;
+        var->currStrides[0] = 1;
+
+        for (k = 1; k < nDims; k++){
+            var->strides[k] = var->strides[k-1] * dims[k-1];
+            var->currStrides[k] = var->currStrides[k-1] * (**(currDimsPtr+(k-1)));
+        }
+    }
+
+
     for (i = 0; i < frameSize; i++) {
         if (++var->numHits % var->decimation) continue;
         var->numHits = 0;
-
-        if (var->rowIdx == var->data.nRows) {
-            if (var->okayToRealloc == 1) {
-                rt_ReallocLogVar(var, isVarDims);
-            } else {
-                /* Circular buffer */
-                var->rowIdx = 0;
-                ++(var->wrapped); /* increment the wrap around counter */
-            }
-        }
-
-        if(isVarDims){
-            currDimsPtr = (const void * const *) var->valDims->currSigDims;
-            currDimsSizePtr = (const int_T*) var->valDims->currSigDimsSize;
-            logWidth_valDims = frameData ? 1 : var->valDims->nCols;
-            nRows_valDims = var->valDims->nRows;
-
-            var->strides[0] = 1;
-            var->currStrides[0] = 1;
-
-            for (k = 1; k < nDims; k++){
-                int32_T currDimsVal=0;
-                switch (currDimsSizePtr[k-1]) {
-                  case 1:
-                    currDimsVal = (**(((const uint8_T * const *) currDimsPtr)+(k-1)));
-                    break;
-                  case 2:
-                    currDimsVal = (**(((const uint16_T * const *) currDimsPtr)+(k-1)));
-                    break;
-                  case 4:
-                    currDimsVal = (**(((const uint32_T * const *) currDimsPtr)+(k-1)));
-                    break;
-                }
-                var->strides[k] = var->strides[k-1] * dims[k-1];
-                var->currStrides[k] = var->currStrides[k-1] * currDimsVal;
-            }
-        }
 
         offset       = (int_T)(elSize * var->rowIdx * logWidth);
         currRealRow  = ((char_T*) (var->data.re)) + offset;
@@ -3301,20 +3275,8 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                 int rem = j;
                 idx = 0;
                 for(k = nDims-1; k>=0; k--){
-                    int32_T currDimsVal=0;
-                    switch (currDimsSizePtr[k]) {
-                      case 1:
-                        currDimsVal = (**(((const uint8_T * const *) currDimsPtr)+k));
-                        break;
-                      case 2:
-                        currDimsVal = (**(((const uint16_T * const *) currDimsPtr)+k));
-                        break;
-                      case 4:
-                        currDimsVal = (**(((const uint32_T * const *) currDimsPtr)+k));
-                        break;
-                    }
                     var->coords[k] = rem / var->strides[k];
-                    if( var->coords[k] >= currDimsVal ){
+                    if( var->coords[k] >= (**(currDimsPtr+k)) ){
                         inRange = false;
                         break;
                     }
@@ -3328,31 +3290,35 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                 }
             }
             
-            if (!var->data.dataTypeConvertInfo.conversionNeeded) {
+            if ( ! var->data.dataTypeConvertInfo.conversionNeeded )
+            {
                 /* NO  conversion needed
                  */ 
-                if (inRange) {
+                if(inRange){
                     /* If in range, fill in data */
                     const char *cDataPoint = cData + (i+frameSize*idx) * pointSize;
 
                     (void) memcpy(currRealRow, cDataPoint, elSize);
                     currRealRow += elSize;
                     if (var->data.complex) {
-                        (void) memcpy(currImagRow, cDataPoint + pointSize/2, elSize);
+                        (void) memcpy(currImagRow, cDataPoint + elSize, elSize);
                         currImagRow += elSize;
                     }
-                } else {
+                }
+                else{
                     /* If out of range, fill in NaN or 0:
-                       1) For bool, int32, uint32, int16, uint16, etc,
-                          memset to zeros;
-                       2) For fixed-point data type, NaN conversion is not
-                          allowed, memset to zeros.
+                      1) For bool, int32, uint32, int16, uint16, etc,
+                         memset to zeros;
+                      2) For fixed-point data type, NaN conversion is not
+                         allowed, memset to zeros.
                     */
-                    if (dTypeID == SS_DOUBLE) {
+                    if(dTypeID == SS_DOUBLE){
                         (void) memcpy(currRealRow, &rtNaN, elSize);
-                    } else if (dTypeID == SS_SINGLE){
+                    }
+                    else if(dTypeID == SS_SINGLE){
                         (void) memcpy(currRealRow, &rtNaNF, elSize);
-                    } else {
+                    }
+                    else{
                         (void) memset(currRealRow, 0, elSize);
                     }
                     
@@ -3370,9 +3336,6 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                  */ 
                 DTypeId dataTypeIdOriginal = 
                     var->data.dataTypeConvertInfo.dataTypeIdOriginal;
-                int_T DpSize = (int_T)((var->data.complex) ? 
-                                       rt_GetSizeofComplexType(dataTypeIdOriginal) : 
-                                       rt_GetSizeofDataType(dataTypeIdOriginal));
 
                 DTypeId dataTypeIdLoggingTo = 
                     var->data.dataTypeConvertInfo.dataTypeIdLoggingTo;
@@ -3412,89 +3375,97 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                         {
                           case SS_DOUBLE:
                             {
-                                const real_T *pInData = (const real_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const real_T *pInData = ((const real_T *)(cData));
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const real_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_SINGLE:
                             {
-                                const real32_T *pInData = (const real32_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const real32_T *pInData = ((const real32_T *)(cData));
 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const real32_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_INT8:
                             {
-                                const int8_T *pInData = (const int8_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const int8_T *pInData = ((const int8_T *)(cData));
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const int8_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_UINT8:
                             {
-                                const uint8_T *pInData = (const uint8_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const uint8_T *pInData = ((const uint8_T *)(cData));
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const uint8_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_INT16:
                             {
-                                const int16_T *pInData = (const int16_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const int16_T *pInData = ((const int16_T *)(cData));
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const int16_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_UINT16:
                             {
-                                const uint16_T *pInData = (const uint16_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const uint16_T *pInData = ((const uint16_T *)(cData));
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const uint16_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_INT32:
                             {
-                                const int32_T *pInData = (const int32_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const int32_T *pInData = ((const int32_T *)(cData));
+                                
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const int32_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
                           case SS_UINT32:
                             {
-                                const uint32_T *pInData = (const uint32_T *)(cData + (i+frameSize*idx)* DpSize);
+                                const uint32_T *pInData = ((const uint32_T *)(cData));
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                pInData += (i+frameSize*idx) * adjIndexIfComplex;
+                                
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    pInData = (const uint32_T *)(cData + (i+frameSize*idx)* DpSize + DpSize/2);
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
@@ -3504,9 +3475,9 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                                 
                                 pInData += (i+frameSize*idx) * adjIndexIfComplex;
                                 
-                                curRealValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                curRealValue = ldexp( fracSlope * (double)pInData[0], fixedExp ) + bias;
                                 if (var->data.complex) {
-                                    curImagValue = ldexp( fracSlope * (double)(*pInData), fixedExp ) + bias;
+                                    curImagValue = ldexp( fracSlope * (double)pInData[1], fixedExp ) + bias;
                                 }
                             }
                             break;
@@ -3525,9 +3496,10 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                                 }
                             }
                             break;
-                        } /* -- end of switch -- */
+                        } /* -- end of swith -- */
                     }
-                } else {
+                }
+                else{
                     /* if out of range, just fill NaN or 0 */
                     if(dTypeID == SS_DOUBLE || dTypeID == SS_SINGLE){
                         curRealValue = ldexp( rtNaN, fixedExp ) + bias;
@@ -3633,7 +3605,7 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
                         }
                     }
                     break;
-                } /* -- end of switch -- */
+                } /* -- end of swith -- */
 
                 currRealRow += elSize;
                 if (var->data.complex) {
@@ -3644,53 +3616,109 @@ void rt_UpdateLogVar(LogVar *var, const void *data, boolean_T isVarDims)
 
         if(isVarDims){ /* update "valueDimensions" field */
             for(j = 0; j < logWidth_valDims; j ++){
-                int32_T currDimsVal=0;
-                switch (currDimsSizePtr[j]) {
-                  case 1:
-                    currDimsVal = (**(((const uint8_T * const *) currDimsPtr)+j));
-                    break;
-                  case 2:
-                    currDimsVal = (**(((const uint16_T * const *) currDimsPtr)+j));
-                    break;
-                  case 4:
-                    currDimsVal = (**(((const uint32_T * const *) currDimsPtr)+j));
-                    break;
-                }
                 offset_valDims  = (int_T)(elSize_valDims *( var->rowIdx + nRows_valDims * j));
                 currValDimsRow  = ((char_T*) (var->valDims->dimsData)) + offset_valDims;
 
                 /* convert int_T to real_T */
-                currentSigDims = (real_T) currDimsVal;
+                currentSigDims = (real_T) *currDimsPtr[j];
                 (void) memcpy(currValDimsRow, &currentSigDims, elSize_valDims);
                 currValDimsRow += elSize_valDims;
+           }
+        }
+
+        if (++var->rowIdx == var->data.nRows) {
+            if (var->okayToRealloc == 1) {
+                rt_ReallocLogVar(var, isVarDims);
+            }  else {
+                /* Circular buffer */
+                var->rowIdx = 0;
+                ++(var->wrapped); /* increment the wrap around counter */
             }
         }
-        
-        ++var->rowIdx;
     }
 
     return;
 
 } /* end rt_UpdateLogVar */
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
+
+/* Function: rt_UpdateLogVarWithDiscontiguousData ==============================
+ * Abstract:
+ *      Log one row of the LogVar with data that is not contiguous.
+ */
+void rt_UpdateLogVarWithDiscontiguousData(LogVar            *var,
+                                          LogSignalPtrsType data,
+                                          const int_T       *segmentLengths,
+                                          int_T             nSegments)
+{
+    /* This function is only used to log states, there's no var-dims issue. */
+    size_t elSize = var->data.elSize;
+    int_T  offset = (int_T)(elSize * var->rowIdx * var->data.nCols);
+    int    segIdx;
+
+    if (++var->numHits % var->decimation) return;
+    var->numHits = 0;
+
+    if (var->data.complex) {
+        int8_T *dstRe = (int8_T*)(var->data.re) + offset;
+        int8_T *dstIm = (int8_T*)(var->data.im) + offset;
+
+        for (segIdx = 0; segIdx < nSegments; segIdx++) {
+            int_T         nEl  = segmentLengths[segIdx];
+            const  int8_T *src = data[segIdx];
+            int_T         el;
+
+            for (el = 0; el < nEl; el++) {
+                (void)memcpy(dstRe, src, elSize);
+                dstRe += elSize;   src += elSize;
+                (void)memcpy(dstIm, src, elSize);
+                dstIm += elSize;   src += elSize;
+            }
+        }
+    } else {
+        int8_T *dst = (int8_T*)(var->data.re) + offset;
+
+        for (segIdx = 0; segIdx < nSegments; segIdx++) {
+            size_t         segSize = elSize*segmentLengths[segIdx];
+            const  int8_T  *src    = data[segIdx];
+
+            (void)memcpy(dst, src, segSize);
+            dst += segSize;
+        }
+    }
+
+    if (++var->rowIdx == var->data.nRows) {
+        if (var->okayToRealloc == 1) {
+            rt_ReallocLogVar(var, false);
+        } else {
+            /* Circular buffer */
+            var->rowIdx = 0;
+            ++(var->wrapped); /* increment the wrap around counter */
+        }
+    }
+    return;
+
+} /* end rt_UpdateLogVarWithDiscontiguousData */
 
 
 
-
-#ifdef __cplusplus
-extern "C" {
-#endif
- 
- 
 /* Function: rt_UpdateStructLogVar =============================================
  * Abstract:
  *      Called to log data for a structure log variable.
  */
-void rt_UpdateStructLogVar(StructLogVar *var, const real_T *t, const void *data)
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC 
+ 
+PUBLIC void rt_UpdateStructLogVar(StructLogVar *var, const real_T *t, const void *data)
 {
     LogVar       *values = var->signals.values;
     const char_T *signal = data;
@@ -3714,27 +3742,29 @@ void rt_UpdateStructLogVar(StructLogVar *var, const real_T *t, const void *data)
         values = values->next;
         i++;
     }
-
 } /* end rt_UpdateStructLogVar */
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
 
-
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
- 
- 
 /* Function: rt_UpdateTXYLogVars ===============================================
  * Abstract:
  *	Update the T,X,Y variables that are being logged.
  */
-const char_T *rt_UpdateTXYLogVars(RTWLogInfo *li, time_T *tPtr)
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC 
+ 
+BEGIN_PUBLIC
+#if MAT_FILE == 1
+END_PUBLIC          
+PUBLIC const char_T *rt_UpdateTXYLogVars(RTWLogInfo *li, time_T *tPtr)
 {
     LogInfo *logInfo     = rtliGetLogInfo(li);
     int_T   matrixFormat = (rtliGetLogFormat(li) == 0);
@@ -3870,29 +3900,38 @@ const char_T *rt_UpdateTXYLogVars(RTWLogInfo *li, time_T *tPtr)
             }
         }
     }
+
     return(NULL);
 
 } /* end rt_UpdateTXYLogVars */
+BEGIN_PUBLIC
+#else
+#define rt_UpdateTXYLogVars(li, tPtr) NULL /* do nothing */
+#endif
+END_PUBLIC          
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC          
           
-
-          
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
 /* Function: rt_UpdateSigLogVars ===============================================
  * Abstract:
  *	Update the Signal Logging testpoint variables that are being logged.
  *
  */
-void rt_UpdateSigLogVars(RTWLogInfo *li, time_T *tPtr)
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+
+BEGIN_PUBLIC
+#if MAT_FILE == 1
+END_PUBLIC
+PUBLIC void rt_UpdateSigLogVars(RTWLogInfo *li, time_T *tPtr)
 {
     LogInfo   *logInfo     = rtliGetLogInfo(li);
 
@@ -3917,25 +3956,33 @@ void rt_UpdateSigLogVars(RTWLogInfo *li, time_T *tPtr)
     }
 
 } /* end rt_UpdateSigLogVars */
+BEGIN_PUBLIC
+#else
+#define rt_UpdateSigLogVars(li, tPtr); /* do nothing */
+#endif
+END_PUBLIC          
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
+END_PUBLIC
 
-
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
-/* Function: rt_StopDataLoggingForRaccel =======================================
+/* Function: rt_StopDataLogging ================================================
  * Abstract:
  *	Write logged data to model.mat and free memory.
  */
-void rt_StopDataLoggingForRaccel(const char_T *file, RTWLogInfo *li, int verbose)
+
+BEGIN_PUBLIC
+#ifdef __cplusplus
+extern "C" {
+#endif
+END_PUBLIC
+
+BEGIN_PUBLIC
+#if MAT_FILE == 1
+END_PUBLIC
+PUBLIC void rt_StopDataLogging(const char_T *file, RTWLogInfo *li)
 {
     FILE          *fptr;
     LogInfo       *logInfo     = (LogInfo*) rtliGetLogInfo(li);
@@ -3962,7 +4009,7 @@ void rt_StopDataLoggingForRaccel(const char_T *file, RTWLogInfo *li, int verbose
      * First log all the variables in the LogVar list *
      **************************************************/
     while (var != NULL) {
-        if ( (msg = rt_FixupLogVar(var,verbose)) != NULL ) {
+        if ( (msg = rt_FixupLogVar(var)) != NULL ) {
             (void)fprintf(stderr,"*** Error writing %s due to: %s\n",file,msg);
             errFlag = 1;
             break;
@@ -3995,7 +4042,7 @@ void rt_StopDataLoggingForRaccel(const char_T *file, RTWLogInfo *li, int verbose
 
         if (svar->logTime) {
             var = svar->time;
-            if ( (msg = rt_FixupLogVar(var,verbose)) != NULL ) {
+            if ( (msg = rt_FixupLogVar(var)) != NULL ) {
                 (void)fprintf(stderr, "*** Error writing %s due to: %s\n",
                               file, msg);
                 errFlag = 1;
@@ -4005,7 +4052,7 @@ void rt_StopDataLoggingForRaccel(const char_T *file, RTWLogInfo *li, int verbose
 
         var = svar->signals.values;
         while (var) {
-            if ( (msg = rt_FixupLogVar(var,verbose)) != NULL ) {
+            if ( (msg = rt_FixupLogVar(var)) != NULL ) {
                 (void)fprintf(stderr, "*** Error writing %s due to: %s\n",
                               file, msg);
                 errFlag = 1;
@@ -4036,9 +4083,7 @@ void rt_StopDataLoggingForRaccel(const char_T *file, RTWLogInfo *li, int verbose
     if (emptyFile || errFlag) {
         (void)remove(file);
     } else {
-        if( verbose ) {
-            (void)printf("** created %s **\n\n", file);
-        }
+        (void)printf("** created %s **\n\n", file);
     }
 
  EXIT_POINT:
@@ -4053,45 +4098,17 @@ void rt_StopDataLoggingForRaccel(const char_T *file, RTWLogInfo *li, int verbose
     FREE(logInfo);
     rtliSetLogInfo(li,NULL);
 
-} /* end rt_StopDataLoggingForRaccel */
-
-
-#ifdef __cplusplus
-}
-#endif
-
-
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
-/* Function: rt_StopDataLogging ================================================
- * Abstract:
- *	Write logged data to model.mat and free memory.
- */
-void rt_StopDataLogging(const char_T *file, RTWLogInfo *li)
-{
-    rt_StopDataLoggingForRaccel(file,li,1);
-
 } /* end rt_StopDataLogging */
+BEGIN_PUBLIC
+#else
+#define rt_StopDataLogging(file, li); /* do nothing */
+#endif
+END_PUBLIC
 
-
+BEGIN_PUBLIC
 #ifdef __cplusplus
 }
 #endif
-
-#else /*!defined(MAT_FILE) || (defined(MAT_FILE) && MAT_FILE == 1)*/
-
-#define rt_StartDataLogging(li, finalTime, stepSize, errStatus) NULL /* do nothing */
-#define rt_UpdateTXYLogVars(li, tPtr) NULL /* do nothing */
-#define rt_UpdateSigLogVars(li, tPtr); /* do nothing */
-#define rt_StopDataLogging(file, li); /* do nothing */
-
-#endif /*!defined(MAT_FILE) || (defined(MAT_FILE) && MAT_FILE == 1)*/
-
-
+END_PUBLIC
 
 /* [eof] rt_logging.c */

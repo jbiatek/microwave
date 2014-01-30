@@ -1,7 +1,7 @@
 /*
  * Copyright 1990-2008 The MathWorks, Inc.
  *
- * File: rtw_extmode.h     $Revision: 1.1.6.4 $
+ * File: rtw_extmode.h     $Revision: 1.1.6.1 $
  *
  * Abstract:
  *   Type definitions for Simulink External Mode support.
@@ -26,13 +26,8 @@ typedef struct _RTWExtModeInfo_tag {
     const void **mdlMappingInfoPtr;/* Pointer to the model's mapping info
                                     * pointer
                                     */
-
-#if !defined(ENABLE_SLEXEC_SSBRIDGE)
-    void       *tPtr;              /* Copy of model's time pointer */
-#else
-    void *simStruct; /* simulink execution (raccel/rsim) needs simstruct */
-#endif
-
+    void       *tPtr;              /* Copy of model's time pointer
+                                    */
     int32_T tFinalTicks;           /* Used with integer only code, holds the
                                     * number of base rate ticks representing
                                     * the final time (final time in seconds
@@ -55,25 +50,11 @@ typedef struct _RTWExtModeInfo_tag {
 #define rteiGetChecksum2(E) (E)->checksumsPtr[2]
 #define rteiGetChecksum3(E) (E)->checksumsPtr[3]
 
+#define rteiSetTPtr(E,p) ((E)->tPtr = (p))
+#define rteiGetT(E)      ((time_T *)(E)->tPtr)[0]
+
 #define rteiGetTFinalTicks(E) ((int32_T)((E)->tFinalTicks))
 #define rteiGetPtrTFinalTicks(E) ((int32_T *)(&((E)->tFinalTicks)))
-
-#if defined(ENABLE_SLEXEC_SSBRIDGE)
-
-  #include "slexec_linkage_spec.h"
-
- /* 
-  * Time Accessor for simulink execution based simulation
-  * (raccel/rsim)
-  */
-  SLEXEC_C_EXPORT_FCN time_T rteiGetT(RTWExtModeInfo* ei);
-
-  #define rteiSetTPtr(E,p) /* no-op */
-
-#else
-  #define rteiSetTPtr(E,p) ((E)->tPtr = (p))
-  #define rteiGetT(E)      ((time_T *)(E)->tPtr)[0]
-#endif
 
 /*
  * UNUSED_PARAMETER(x)

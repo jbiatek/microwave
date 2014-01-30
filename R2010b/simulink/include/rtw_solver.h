@@ -1,7 +1,7 @@
 /*
  * Copyright 1990-2010 The MathWorks, Inc.
  *
- * File: rtw_solver.h     $Revision: 1.1.6.10 $
+ * File: rtw_solver.h     $Revision: 1.1.6.6 $
  *
  * Abstract:
  *   Type definitions for continuous-time solver support.
@@ -16,28 +16,6 @@
  * =============================================================================
  */
 #ifndef NO_FLOATS /* ERT integer-only */
-/*
- * Enum for solver tolerance
- */
-typedef enum {
-    SL_SOLVER_TOLERANCE_AUTO  = 0,  /* Set Automatically by Solver */
-    SL_SOLVER_TOLERANCE_LOCAL = 1,  /* Set Locally, e.g., by Blocks */
-    SL_SOLVER_TOLERANCE_GLOBAL = 2, /* Set Globally, e.g., by Block Diagram */
-    SL_SOLVER_TOLERANCE_UNDEFINED = 255 /* Signal uninitialized */
-} SL_SolverToleranceControlFlag_T;
-
-
-/*
- * Enum for jacobian method control
- */
-typedef enum {
-    SL_JM_BD_AUTO = 0,
-    SL_JM_BD_SPARSE_PERTURBATION,
-    SL_JM_BD_FULL_PERTURBATION,
-    SL_JM_BD_SPARSE_ANALYTICAL,
-    SL_JM_BD_FULL_ANALYTICAL
-} slJmBdControl;
-
 
 typedef struct _ssSolverInfo_tag {
     void        *rtModelPtr;
@@ -67,7 +45,7 @@ typedef struct _ssSolverInfo_tag {
 
     int_T       solverRefineFactor;
     real_T      solverRelTol;
-    real_T      unused_real_T_1;
+    real_T      solverAbsTol;
 
     real_T      **dXPtr;
     time_T      **tPtr;
@@ -84,6 +62,7 @@ typedef struct _ssSolverInfo_tag {
     boolean_T   foundContZcEvents;
     boolean_T   isAtLeftPostOfContZcEvent;
     boolean_T   isAtRightPostOfContZcEvent;
+    boolean_T   needsContZcEventNotification;
     boolean_T   adaptiveZcDetection;
 
     int_T       numZcSignals;
@@ -107,10 +86,9 @@ typedef struct _ssSolverInfo_tag {
     int_T       consecutiveZCsError;
     boolean_T   blkStateChange;
     boolean_T   isComputingJacobian;
-    slJmBdControl solverJacobianMethodControl;
+    int_T       solverJacobianMethodControl;
     int_T       ignoredZcDiagnostic;
     int_T       maskedZcDiagnostic;
-    boolean_T   isOutputMethodComputed;
 } ssSolverInfo;
 
 /* Support old name RTWSolverInfo */
@@ -191,6 +169,9 @@ typedef ssSolverInfo RTWSolverInfo;
 #define rtsiSetSolverRelTol(S,smo) ((S)->solverRelTol = (smo))
 #define rtsiGetSolverRelTol(S)     (S)->solverRelTol
 
+#define rtsiSetSolverAbsTol(S,smo) ((S)->solverAbsTol = (smo))
+#define rtsiGetSolverAbsTol(S)     (S)->solverAbsTol
+
 #define rtsiSetSolverMassMatrixType(S,type)  ((S)->massMatrixType = (type))
 #define rtsiGetSolverMassMatrixType(S)  (S)->massMatrixType
 
@@ -229,9 +210,6 @@ typedef ssSolverInfo RTWSolverInfo;
 
 #define rtsiSetSolverComputingJacobian(S,val) ((S)->isComputingJacobian = (val))
 #define rtsiIsSolverComputingJacobian(S)    (S)->isComputingJacobian
-
-#define rtsiSetSolverOutputComputed(S,val) ((S)->isOutputMethodComputed = (val))
-#define rtsiIsSolverOutputComputed(S) (S)->isOutputMethodComputed
 
 #endif /* !NO_FLOATS */
 

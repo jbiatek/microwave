@@ -1,5 +1,5 @@
 /*
- * Copyright 2009-2010 The MathWorks, Inc.
+ * Copyright 2009 The MathWorks, Inc.
  *
  * File: sl_types_def.h
  *
@@ -28,6 +28,8 @@ typedef enum {
 } BuiltInDTypeId;
 
 #define SS_NUM_BUILT_IN_DTYPE ((int_T)SS_BOOLEAN+1)
+
+#define SS_UNDERLYING_TYPE_FOR_ENUM_DATA SS_INT32
 
 #ifndef _DTYPEID
 #  define _DTYPEID

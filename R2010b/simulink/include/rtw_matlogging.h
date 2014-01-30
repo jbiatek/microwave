@@ -1,7 +1,7 @@
 /*
  * Copyright 1990-2007 The MathWorks, Inc.
  *
- * File: rtw_matlogging.h     $Revision: 1.1.6.3 $
+ * File: rtw_matlogging.h     $Revision: 1.1.6.2 $
  *
  * Abstract:
  *   Type definitions for MAT-file logging support.
@@ -38,9 +38,9 @@ typedef struct RTWLogSignalInfo_tag {
     int_T          *numCols;
     int_T          *numDims;
     int_T          *dims;
-    boolean_T      *isVarDims;       /* Dimension Mode: true -- VarDims / false -- fixed dims */
-    void           **currSigDims;    /* current signal dimensions */
-    int_T          *currSigDimsSize; /* Size of currSigDims in bytes */
+    boolean_T      *isVarDims; /* Dimension Mode: true -- VarDims / false -- fixed dims */
+    int_T          **currSigDims; 
+                             /* current signal dimensions */
     BuiltInDTypeId *dataTypes;
     int_T          *complexSignals;
     int_T          *frameData;

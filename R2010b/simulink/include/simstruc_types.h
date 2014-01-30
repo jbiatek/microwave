@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 1990-2002 The MathWorks, Inc.
  *
- * File: simstruc_types.h     
+ * File: simstruc_types.h     $Revision: 1.1.6.30 $
  *
  * Abstract:
  *   The embedded RTW code formats do not include simstruc.h, but
@@ -53,11 +53,7 @@ typedef enum {
 typedef enum {
     SS_SIMTYPE_UNKNOWN = -1,
     SS_SIMTYPE_COMMAND_LINE,
-    SS_SIMTYPE_MENU,
-    SS_SIMTYPE_MODEL_API,     
-    SS_SIMTYPE_LINEARIZATION, 
-    SS_SIMTYPE_RTW,
-    SS_SIMTYPE_EXTERNAL
+    SS_SIMTYPE_MENU
 } SS_SimType;
 
 /* Must be used when SS_SimMode is SS_SIMMODE_RTWGEN */
@@ -78,7 +74,6 @@ typedef enum {
     SIMSTATUS_UPDATING,
     SIMSTATUS_INITIALIZING,
     SIMSTATUS_RUNNING,
-    SIMSTATUS_PAUSED_IN_DEBUGGER,
     SIMSTATUS_PAUSED,
     SIMSTATUS_TERMINATING,
 
@@ -102,7 +97,7 @@ struct _rtTimingBridge_tag {
 
     uint32_T*    taskCounter;
 
-    real_T**     taskTime;
+    real_T*       taskTime;
 
     boolean_T**  rateTransition;
     
@@ -171,7 +166,7 @@ typedef int_T ssFcnCallErr_T;
 /*
  * DECL_AND_INIT_DIMSINFO(variableName):
  *    Macro for setting up a DimsInfo in an S-function to DYNAMIC_DIMENSION.
- *    This macro must be placed at the start of a declaration, for example:
+ *    This macro must be placed at the start of a deceleration, for example:
  *
  *           static void mdlInitializeSizes(SimStruct *S)
  *           {
@@ -181,7 +176,7 @@ typedef int_T ssFcnCallErr_T;
  *               <snip>
  *           }
  *
- *    The reason that this macro must be placed in the declaration section of a
+ *    The reason that this macro must be placed in the deceleration section of a
  *    function or other scope is that this macro **creates** a local variable of
  *    the specified name with type DimsInfo_T. The variable is initialized
  *    to DYNAMIC_DIMENSION.
@@ -215,7 +210,26 @@ struct _ssDWorkRecord {
     ssDWorkUsageType usedAs;
 };
 
-#include "sl_sample_time_defs.h"
+/*
+ * INHERITED_SAMPLE_TIME      - Specify for blocks that inherit their sample
+ *                              time from the block that feeds their input.
+ *
+ * CONTINUOUS_SAMPLE_TIME     - A continuous sample time indicates that the
+ *                              block executes every simulation step.
+ *
+ * VARIABLE_SAMPLE_TIME       - Specifies that this sample time is discrete
+ *                              with a varying period.
+ *
+ * FIXED_IN_MINOR_STEP_OFFSET - This can be specified for the offset of either
+ *                              the inherited or continuous sample time
+ *                              indicating that the output does not change
+ *                              in minor steps.
+ */
+
+#define INHERITED_SAMPLE_TIME      ((real_T)-1.0)
+#define CONTINUOUS_SAMPLE_TIME     ((real_T)0.0)
+#define VARIABLE_SAMPLE_TIME       ((real_T)-2.0)
+#define FIXED_IN_MINOR_STEP_OFFSET ((real_T)1.0)
 
 
 /* ========================================================================== */
@@ -270,17 +284,5 @@ typedef struct SparseHeader_Tag {
 #  undef MULTITASKING
 # endif
 #endif
-
-typedef enum {
-    SS_UNKNOWN_INTERPOLATION = -1, 
-    SS_ZOH_INTERPOLATION = 1, 
-    SS_LINEAR_INTERPOLATION = 2
-} SSLoggerInterpMethod;
-
-typedef enum {
-    SS_MODEL_DATA_LOGS = 1, 
-    SS_DATASET_FORMAT = 2,
-    SS_LOG_FORMAT_MIXED = 3
-} SSSignalLoggingSaveFormat;
 
 #endif /* __SIMSTRUC_TYPES_H__ */
