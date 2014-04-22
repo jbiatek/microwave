@@ -21,7 +21,8 @@ LLVM_CFLAGS = -emit-llvm
 
 # define any directories containing header files other than /usr/include
 #
-INCLUDES = -I$(KLEE_HOME)/include/klee/ -Imicrowave/microwave_combined/ -IR2010b/extern/include/ -IR2010b/rtw/c/src/ext_mode/common/ -IR2010b/rtw/c/src/ -IR2010b/simulink/include/
+MY_MICROWAVE = microwave_immediate_cook
+INCLUDES = -I$(KLEE_HOME)/include/klee/ -Imicrowave/$(MY_MICROWAVE)/ -IR2010b/extern/include/ -IR2010b/rtw/c/src/ext_mode/common/ -IR2010b/rtw/c/src/ -IR2010b/simulink/include/
 
 # define library paths in addition to /usr/lib
 #   if I wanted to include libraries not in /usr/lib I'd specify
@@ -34,7 +35,6 @@ LFLAGS = -lm -L$(KLEE_HOME)/Release+Asserts/lib/
 LIBS = -lkleeCore -lkleeRuntest 
 
 # define the C source files
-MY_MICROWAVE = microwave_immediate_cook
 SRCS = symbolic/ert_main.c symbolic/klee_util.c  microwave/$(MY_MICROWAVE)/microwave_combined.c microwave/$(MY_MICROWAVE)/microwave_combined_data.c 
 #R2010b/rtw/c/src/rt_logging.c 
 
