@@ -14,14 +14,14 @@ LLVM_LD = llvm-ld
 LLVM_LD_FLAGS = -link-as-library
 
 # define any compile-time flags
-CFLAGS = -Wall -g -fprofile-arcs -ftest-coverage
+CFLAGS = -Wall -g -fprofile-arcs -ftest-coverage -DRT
 LLVM_CFLAGS = -emit-llvm 
 
 # KLEE_HOME = /data/software/klee
 
 # define any directories containing header files other than /usr/include
 #
-INCLUDES = -I$(KLEE_HOME)/include/klee/ -Imicrowave/microwave_grt_rtw/ -IR2013a/extern/include/ -IR2013a/rtw/c/src/ext_mode/common/ -IR2013a/rtw/c/src/ -IR2013a/simulink/include/
+INCLUDES = -I$(KLEE_HOME)/include/klee/ -Imicrowave/microwave_combined/ -IR2010b/extern/include/ -IR2010b/rtw/c/src/ext_mode/common/ -IR2010b/rtw/c/src/ -IR2010b/simulink/include/
 
 # define library paths in addition to /usr/lib
 #   if I wanted to include libraries not in /usr/lib I'd specify
@@ -34,7 +34,9 @@ LFLAGS = -lm -L$(KLEE_HOME)/Release+Asserts/lib/
 LIBS = -lkleeCore -lkleeRuntest 
 
 # define the C source files
-SRCS = symbolic/ert_main.c symbolic/klee_util.c microwave/microwave_grt_rtw/rtGetInf.c microwave/microwave_grt_rtw/rtGetNaN.c microwave/microwave_grt_rtw/rt_nonfinite.c  microwave/microwave_grt_rtw/microwave.c microwave/microwave_grt_rtw/microwave_data.c R2013a/rtw/c/src/rt_logging.c
+MY_MICROWAVE = microwave_immediate_cook
+SRCS = symbolic/ert_main.c symbolic/klee_util.c  microwave/$(MY_MICROWAVE)/microwave_combined.c microwave/$(MY_MICROWAVE)/microwave_combined_data.c 
+#R2010b/rtw/c/src/rt_logging.c 
 
 # define the C object files 
 #

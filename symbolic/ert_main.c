@@ -18,14 +18,15 @@
 #include <stdio.h>                     /* This ert_main.c example uses printf/fflush */
 #include <stdlib.h>
 #include <errno.h>
-#include "microwave.h"                  /* Model's header file */
+#include "microwave_combined.h"                  /* Model's header file */
 #include "rtwtypes.h"                  /* MathWorks types */
+#include "klee.h"
 #include "klee_util.h"
 
 
 
-void make_input_symbolic(ExtU_microwave_T *input);
-void make_input_symbolic(ExtU_microwave_T *input)
+void make_input_symbolic(ExternalInputs_microwave_combin *input);
+void make_input_symbolic(ExternalInputs_microwave_combin *input)
 {
   klee_make_symbolic_range( &(input->KP_START), 0, 
                       sizeof(boolean_T), "KP_START");
@@ -55,6 +56,25 @@ void make_input_symbolic(ExtU_microwave_T *input)
                       sizeof(boolean_T), "DOOR_CLOSED");
 }
 
+void check_observers();
+void check_observers()
+{
+  klee_assert(microwave_combined_Y.S1);
+  klee_assert(microwave_combined_Y.S2);
+  klee_assert(microwave_combined_Y.R1);
+  klee_assert(microwave_combined_Y.R2);
+  klee_assert(microwave_combined_Y.R3);
+  klee_assert(microwave_combined_Y.R4);
+  klee_assert(microwave_combined_Y.R5);
+  klee_assert(microwave_combined_Y.R6);
+  klee_assert(microwave_combined_Y.R7);
+  klee_assert(microwave_combined_Y.R8);
+  klee_assert(microwave_combined_Y.R9);
+  klee_assert(microwave_combined_Y.R10);
+  klee_assert(microwave_combined_Y.R11);
+  klee_assert(microwave_combined_Y.R12);
+}
+
 /*
  * Associating rt_OneStep with a real-time clock or interrupt service routine
  * is what makes the generated code "real-time".  The function rt_OneStep is
@@ -66,8 +86,8 @@ void make_input_symbolic(ExtU_microwave_T *input)
  * your application needs.  This example simply sets an error status in the
  * real-time model and returns from rt_OneStep.
  */
-void rt_OneStep(ExtU_microwave_T *input);
-void rt_OneStep(ExtU_microwave_T *input)
+void rt_OneStep(ExternalInputs_microwave_combin *input);
+void rt_OneStep(ExternalInputs_microwave_combin *input)
 {
   static boolean_T OverrunFlag = 0;
 
@@ -75,7 +95,7 @@ void rt_OneStep(ExtU_microwave_T *input)
 
   /* Check for overrun */
   if (OverrunFlag) {
-    rtmSetErrorStatus(microwave_M, "Overrun");
+    rtmSetErrorStatus(microwave_combined_M, "Overrun");
     return;
   }
 
@@ -84,12 +104,13 @@ void rt_OneStep(ExtU_microwave_T *input)
   /* Save FPU context here (if necessary) */
   /* Re-enable timer or interrupt here */
   /* Set model inputs here */
-  microwave_U = *input;
+  microwave_combined_U = *input;
 
   /* Step the model */
-  microwave_step();
+  microwave_combined_step();
 
   /* Get model outputs here */
+  check_observers ();
 
   /* Indicate task complete */
   OverrunFlag = FALSE;
@@ -121,12 +142,12 @@ int_T main(int_T argc, const char_T *argv[])
   }
 
   /* Initialize model */
-  microwave_initialize(); // used to have an argument: 1.
+  microwave_combined_initialize(1); // used to have an argument: 1.
 
   /* Create symbolic inputs beforehand */
   //make_input_symbolic();
   int step_num;
-  ExtU_microwave_T inputs[num_steps];
+  ExternalInputs_microwave_combin inputs[num_steps];
   int i;
   for (i=0; i<num_steps; i++)
   {
@@ -140,7 +161,7 @@ int_T main(int_T argc, const char_T *argv[])
    *  rt_OneStep();
    */
   step_num = 0;
-  while (rtmGetErrorStatus(microwave_M) == (NULL) && step_num < num_steps) {
+  while (rtmGetErrorStatus(microwave_combined_M) == (NULL) && step_num < num_steps) {
     /*  Perform other application tasks here */
     rt_OneStep( &(inputs[step_num]));
     step_num++;
@@ -149,7 +170,7 @@ int_T main(int_T argc, const char_T *argv[])
   /* Disable rt_OneStep() here */
 
   /* Terminate model */
-  microwave_terminate();
+  microwave_combined_terminate();
   return 0;
 }
 
